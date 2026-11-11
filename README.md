@@ -106,7 +106,7 @@ Para garantir **estabilidade máxima**, **zero quedas de conexão** e **privacid
 
 #### 🧹 Como Funciona a Limpeza Total de Configurações e Sessões?
 Se você desejar apagar o perfil salvo, remover credenciais de login ou restaurar o aplicativo ao estado original de fábrica:
-- **No PC (GUI)**: Acesse a aba **CONFIGURAÇÕES** e clique no botão **"LIMPAR TODAS AS CONFIGURAÇÕES E DADOS SALVOS"**. O aplicativo encerra qualquer túnel ativo, exclui `ardc_vpn.conf` e apaga a sessão Proton salva em `~/.protonvpn-session.json` (`%USERPROFILE%\.protonvpn-session.json` no Windows).
+- **No PC (GUI)**: Acesse a aba **CONFIGURAÇÕES** e clique no botão **"LIMPAR TODAS AS CONFIGURAÇÕES E DADOS SALVOS"**. O aplicativo encerra qualquer túnel ativo, exclui `ardc_vpn.conf` e apaga as sessões salvas: Proton em `~/.protonvpn-session.json` e NordVPN em `~/.nordvpn-session.json` (`%USERPROFILE%\...` no Windows).
 - **No PC (CLI)**: Execute o comando `./ARDiscordBypass_linux -stop` e remova os arquivos locais de perfil e sessão.
 - **No Android (APK)**: Acesse a aba **CONFIGURAÇÕES** e toque no botão **"LIMPAR TODAS AS CONFIGURAÇÕES E DADOS"**. O aplicativo desativa imediatamente a VPN, deleta o arquivo `ardc_vpn.conf` do armazenamento privado do app e limpa o buffer de logs.
 
@@ -120,6 +120,7 @@ A versão GUI (`ARDiscordBypass_gui_linux` e `ARDiscordBypass_gui.exe`) **conté
 | `-stop`, `--stop` | **Encerramento total**: Fecha todas as instâncias do Discord, destrói o túnel WireGuard e remove o namespace isolado / WireSock, devolvendo a rede ao estado padrão original. |
 | `-cfg <caminho>`, `--config` | **Configuração personalizada**: Aponta diretamente para qualquer arquivo `.conf` WireGuard no seu disco sem precisar renomear. |
 | `-l`, `--login`, `--proton` | **Renovação de credenciais**: Força um novo login na API do ProtonVPN para gerar chaves e túnel atualizados. |
+| `--nord`, `--nordvpn` | **NordVPN**: Gera o túnel pela sua assinatura NordVPN, pedindo um token de acesso do Nord Account. |
 | `-h`, `--help` | Exibe o menu de ajuda com todos os parâmetros disponíveis. |
 
 **Exemplos:**
@@ -134,6 +135,20 @@ A versão GUI (`ARDiscordBypass_gui_linux` e `ARDiscordBypass_gui.exe`) **conté
 ARDiscordBypass.exe -stop
 ARDiscordBypass.exe -cfg "C:\Users\Nome\Downloads\minha_vpn.conf"
 ```
+
+### 3. Alternativa: Usar Sua Assinatura NordVPN
+
+Quem já assina a NordVPN pode gerar o túnel por ela em vez da ProtonVPN. A NordVPN **não tem plano gratuito**: é preciso uma assinatura ativa. A ProtonVPN gratuita continua sendo a opção padrão.
+
+1. Acesse [**Nord Account → NordVPN → Configuração manual**](https://my.nordaccount.com/dashboard/nordvpn/manual-configuration/), confirme o código enviado por email e gere um **token de acesso**.
+2. Informe o token no aplicativo:
+   - **PC (GUI)**: aba **CONFIGURAÇÕES** → **NordVPN** → cole o token → **Validar Token & Gerar Perfil** (ou use o cartão NordVPN do assistente inicial).
+   - **PC (CLI)**: execute `./ARDiscordBypass_linux --nord` (ou `ARDiscordBypass.exe --nord`) e cole o token quando solicitado. Na primeira execução sem perfil salvo, o assistente pergunta qual provedor usar.
+   - **Android**: aba **CONFIGURAÇÕES** → **OPÇÃO 2: CONTA NORDVPN** → cole o token → **VALIDAR TOKEN & GERAR PERFIL**.
+3. O aplicativo obtém a chave NordLynx da conta, escolhe o servidor recomendado pela NordVPN (EUA, com Holanda e Japão como reserva) e grava o `ardc_vpn.conf`.
+
+- **O token não é salvo**: ele segue para o gerador pela entrada padrão (não aparece na linha de comando) e é descartado. Fica salva apenas a chave NordLynx, em `~/.nordvpn-session.json` (`%USERPROFILE%\.nordvpn-session.json` no Windows), para renovar o túnel sem pedir o token de novo.
+- **Prefere não informar um token?** Baixe o `.conf` WireGuard oficial no mesmo painel do Nord Account e use `-cfg`, "Perfil WireGuard Customizado" (GUI) ou "Importar perfil" (Android).
 
 ---
 
@@ -161,21 +176,24 @@ ARDiscordBypass/
 │   ├── build.sh              ← Script de automação Linux (CLI + GUI)
 │   ├── build.bat             ← Script de automação Windows (CLI + GUI)
 │   ├── core/service.h        ← Gerenciador de túnel e processos do Desktop
+│   ├── core/provider.h       ← Definições comuns dos provedores (ProtonVPN / NordVPN)
 │   ├── gui/                  ← Interface gráfica OpenGL Dear ImGui (Dark/Light)
 │   └── os/
 │       ├── linux/platform.h  ← Namespace WireGuard isolado (`ar-discord-vpn`)
 │       └── windows/platform.h← WireSock WFP e controle de processos Win32
 │
 ├── tools/
-│   └── proton-confgen/       ← Código-fonte aberto do gerador de perfil Proton (Go 1.22+)
-│       ├── Makefile          ← Script de compilação multi-plataforma
-│       ├── cmd/protonvpn-wg/ ← Ponto de entrada CLI (main.go com DNS fallback)
-│       └── internal/         ← SRP auth, uTLS client, API Proton e WireGuard keygen
+│   ├── proton-confgen/       ← Código-fonte aberto do gerador de perfil Proton (Go 1.22+)
+│   │   ├── Makefile          ← Script de compilação multi-plataforma
+│   │   ├── cmd/protonvpn-wg/ ← Ponto de entrada CLI (main.go com DNS fallback)
+│   │   └── internal/         ← SRP auth, uTLS client, API Proton e WireGuard keygen
+│   └── nord-confgen/         ← Código-fonte aberto do gerador de perfil NordVPN (Go 1.22+)
 │
 ├── Mobile/
 │   ├── Android/              ← App Android nativo (Kotlin, VpnService, WireGuard GoBackend)
 │   │   └── app/src/main/jniLibs/arm64-v8a/
-│   │       └── libprotonconfgen.so ← Binário nativo gerado a partir de tools/proton-confgen
+│   │       ├── libprotonconfgen.so ← Binário nativo gerado a partir de tools/proton-confgen
+│   │       └── libnordconfgen.so   ← Binário nativo gerado a partir de tools/nord-confgen
 │   └── (iOS)/                ← Planejado (NetworkExtension)
 │
 ├── DOCS.md                   ← Documentação técnica completa e engenharia de rede
@@ -232,6 +250,16 @@ build.bat
 build.bat --gui
 ```
 *(Para compilação manual detalhada via MinGW/GCC com `objcopy`, consulte a Seção 6.2 do [**DOCS.md**](DOCS.md)).*
+
+### Gerador NordVPN (Go)
+Os binários do gerador NordVPN já acompanham o repositório (`PC/bin/nord-confgen`, `PC/bin/nord-confgen.exe` e `libnordconfgen.so`). Para recompilá-los a partir de [`tools/nord-confgen/`](tools/nord-confgen/):
+```bash
+cd tools/nord-confgen
+go test ./...
+CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ../../PC/bin/nord-confgen .
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ../../PC/bin/nord-confgen.exe .
+CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o ../../Mobile/Android/app/src/main/jniLibs/arm64-v8a/libnordconfgen.so .
+```
 
 ### Android (APK & Motor Go)
 ```bash

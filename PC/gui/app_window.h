@@ -40,6 +40,7 @@ private:
   void triggerStop();
   void triggerProtonLogin();
   void triggerProtonLoginAndStart();
+  void triggerNordLogin(bool startAfter);
   void triggerClearAll();
   void pickConfigFile();
   void openBrowser(const std::string &url);
@@ -62,11 +63,15 @@ private:
   bool hasValidConfig() const;
 
   // Estado da UI
-  int m_configMode = 0; // 0 = Proton, 1 = Custom .conf
+  int m_configMode = 0; // 0 = Proton, 1 = Custom .conf, 2 = NordVPN
   char m_customPathBuf[512] = "";
   char m_protonUserBuf[128] = "";
   char m_protonPassBuf[128] = "";
   bool m_hidePassword = true;
+  char m_nordTokenBuf[256] = "";
+  bool m_hideNordToken = true;
+  VpnProvider m_activeProvider = VpnProvider::None; // provedor que gerou o ardc_vpn.conf atual
+  const char *m_authProviderName = "PROTONVPN";     // título do overlay de autenticação
 
   std::atomic<bool> m_isWorking{false};
   std::atomic<bool> m_isConnecting{false};

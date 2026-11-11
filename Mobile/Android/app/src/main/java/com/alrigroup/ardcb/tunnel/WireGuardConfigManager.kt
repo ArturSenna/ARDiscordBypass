@@ -53,11 +53,26 @@ object WireGuardConfigManager {
         return java.io.File(context.filesDir, "ardc_vpn.conf").exists()
     }
 
+    // O gerador NordVPN identifica seus perfis no cabeçalho de comentários.
+    fun isNordProfile(context: Context): Boolean {
+        return try {
+            java.io.File(context.filesDir, "ardc_vpn.conf").useLines { lines ->
+                lines.map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                    .takeWhile { it.startsWith("#") }
+                    .any { it.contains("NordVPN WireGuard Configuration") }
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     fun deleteConfig(context: Context): Boolean {
         return try {
             val f = java.io.File(context.filesDir, "ardc_vpn.conf")
             val s = java.io.File(context.filesDir, ".protonvpn-session.json")
             if (s.exists()) s.delete()
+            NordAuthManager.clearSession(context)
             if (f.exists()) f.delete() else true
         } catch (_: Exception) {
             false

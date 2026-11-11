@@ -40,6 +40,7 @@ ardc_vpn.conf
 *.session
 *.key
 .protonvpn-session.json
+.nordvpn-session.json
 *.log
 imgui.ini
 

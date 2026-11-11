@@ -85,6 +85,15 @@ public:
 #endif
   }
 
+  bool hasNordSession() {
+    return ::hasNordSession();
+  }
+
+  // Provedor que gerou o perfil padrão (None = ausente ou trazido pelo usuário).
+  VpnProvider activeProvider() {
+    return detectConfProvider("ardc_vpn.conf");
+  }
+
   bool isTunnelActive() {
 #ifdef _WIN32
     return isWireSockRunning();
@@ -170,6 +179,20 @@ public:
     }
   }
 
+  // O token só é usado para obter a chave NordLynx; não é salvo nem registrado em log.
+  bool loginNord(const std::string &token, std::string &outErr, std::function<void(const std::string &)> onProgress = nullptr) {
+    addLog("Validando token de acesso na API NordVPN...", 0);
+    if (onProgress) onProgress("Iniciando conexão segura com a NordVPN...");
+    std::string err;
+    if (runNordConfgen(trimWhitespace(token), &err, onProgress)) {
+      addLog("Perfil WireGuard NordVPN gerado com sucesso!", 1);
+      return true;
+    }
+    outErr = err.empty() ? "Falha ao gerar o perfil NordVPN." : err;
+    addLog("Erro ao configurar a NordVPN: " + outErr, 3);
+    return false;
+  }
+
   bool startBypass(const std::string &configPath, std::string &outErr, std::function<void(const std::string &)> onProgress = nullptr) {
     auto notify = [&](const std::string &m) {
       addLog(m, 0);
@@ -190,9 +213,11 @@ public:
 
     notify("Ativando túnel WireGuard isolado (" + configPath + ")...");
 #ifndef _WIN32
-    bool tunnelOk = ensureWireGuardNetns(configPath);
+    std::string tunnelDetail;
+    bool tunnelOk = ensureWireGuardNetns(configPath, &tunnelDetail);
     if (!tunnelOk) {
       outErr = "Falha ao negociar ou validar o túnel WireGuard.";
+      if (!tunnelDetail.empty()) outErr += " (" + tunnelDetail + ")";
       addLog(outErr, 3);
       return false;
     }
@@ -290,6 +315,13 @@ public:
       } catch (...) {}
     }
 #endif
+
+    std::error_code nordEc;
+    fs::path nordSession = nordSessionPath();
+    if (!nordSession.empty() && fs::remove(nordSession, nordEc)) {
+      addLog("Sessão NordVPN (.nordvpn-session.json) removida com sucesso.", 1);
+    }
+
     addLog("Limpeza concluída! Todos os dados e logins foram apagados.", 1);
     return true;
   }

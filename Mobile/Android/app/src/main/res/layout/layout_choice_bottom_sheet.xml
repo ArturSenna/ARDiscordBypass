@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- Com três opções o conteúdo pode passar da altura da tela: o sheet rola. -->
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:background="@drawable/bg_terminal_box"
+    android:background="@drawable/bg_terminal_box">
+
+<LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
     android:orientation="vertical"
     android:padding="20dp">
 
@@ -183,7 +188,81 @@
             android:textSize="10sp" />
     </LinearLayout>
 
-    <!-- OPÇÃO 2: IMPORTAR CONFIG CUSTOMIZADA -->
+    <!-- OPÇÃO 2: NORDVPN (ASSINATURA ATIVA) -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:background="@drawable/bg_tab_inactive"
+        android:orientation="vertical"
+        android:padding="12dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:text="CONTA NORDVPN (ASSINATURA ATIVA)"
+            android:textColor="@color/terminal_text_primary"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:fontFamily="monospace"
+            android:text="Cole um token de acesso gerado no Nord Account. O token não é salvo: o app guarda apenas a chave NordLynx."
+            android:textColor="@color/terminal_text_muted"
+            android:textSize="10sp" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            app:boxBackgroundColor="@color/terminal_surface"
+            app:boxStrokeColor="@color/alri_red"
+            app:passwordToggleEnabled="true"
+            app:passwordToggleTint="@color/terminal_text_muted"
+            app:hintTextColor="@color/terminal_text_secondary"
+            android:textColorHint="@color/terminal_text_muted">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/etChoiceNordToken"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:hint="Token de acesso NordVPN"
+                android:textColor="@color/terminal_text_primary"
+                android:textSize="12sp"
+                android:inputType="textPassword" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnChoiceNordLogin"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:layout_marginTop="10dp"
+            android:fontFamily="monospace"
+            android:text="2. VALIDAR TOKEN &amp; ATIVAR BYPASS"
+            android:textColor="@color/terminal_btn_text"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            app:backgroundTint="@color/alri_red"
+            app:cornerRadius="8dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnChoiceNordWeb"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="match_parent"
+            android:layout_height="36dp"
+            android:layout_marginTop="2dp"
+            android:fontFamily="monospace"
+            android:text="Gerar token de acesso no Nord Account (Web)"
+            android:textColor="@color/terminal_text_muted"
+            android:textSize="10sp" />
+    </LinearLayout>
+
+    <!-- OPÇÃO 3: IMPORTAR CONFIG CUSTOMIZADA -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -217,7 +296,7 @@
             android:layout_height="42dp"
             android:layout_marginTop="10dp"
             android:fontFamily="monospace"
-            android:text="2. IMPORTAR PERFIL PERSONALIZADO"
+            android:text="3. IMPORTAR PERFIL PERSONALIZADO"
             android:textColor="@color/terminal_text_primary"
             android:textSize="11sp"
             app:cornerRadius="8dp"
@@ -225,3 +304,5 @@
     </LinearLayout>
 
 </LinearLayout>
+
+</androidx.core.widget.NestedScrollView>

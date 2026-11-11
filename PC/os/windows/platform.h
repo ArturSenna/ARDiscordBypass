@@ -18,6 +18,8 @@
 #include <vector>
 #include <functional>
 
+#include "../../core/provider.h"
+
 namespace fs = std::filesystem;
 
 inline const std::string WG_CONFIG_NAME = "ardiscord-vpn.conf";
@@ -602,6 +604,265 @@ inline bool setupProtonConfigWindows(
   return true;
 }
 
+extern "C" const char _binary_nord_confgen_exe_start[];
+extern "C" const char _binary_nord_confgen_exe_end[];
+
+// Grava em %LOCALAPPDATA%\ARDiscordBypass um utilitário embutido no executável.
+inline std::wstring extractEmbeddedHelperExe(const std::wstring &name, const char *start, const char *end) {
+  size_t size = end - start;
+  if (size == 0) return L"";
+
+  wchar_t localApp[MAX_PATH];
+  std::wstring targetDir = L"";
+  if (GetEnvironmentVariableW(L"LOCALAPPDATA", localApp, MAX_PATH) != 0) {
+    targetDir = std::wstring(localApp) + L"\\ARDiscordBypass";
+  } else {
+    wchar_t userProfile[MAX_PATH];
+    if (GetEnvironmentVariableW(L"USERPROFILE", userProfile, MAX_PATH) != 0) {
+      targetDir = std::wstring(userProfile) + L"\\ARDiscordBypass";
+    }
+  }
+  if (targetDir.empty()) return L"";
+
+  std::error_code ec;
+  fs::create_directories(targetDir, ec);
+  std::wstring outPath = targetDir + L"\\" + name;
+
+  if (fs::exists(outPath, ec) && fs::file_size(outPath, ec) == size) {
+    return outPath;
+  }
+
+  std::ofstream out(fs::path(outPath), std::ios::binary);
+  if (!out.is_open()) return L"";
+  out.write(start, size);
+  out.close();
+
+  return fs::exists(outPath, ec) ? outPath : L"";
+}
+
+inline std::wstring findNordConfgenExe() {
+  wchar_t modulePath[MAX_PATH];
+  std::vector<std::wstring> candidates = {
+      L"bin\\nord-confgen.exe",
+      L"PC\\bin\\nord-confgen.exe",
+      L"nord-confgen.exe"
+  };
+  if (GetModuleFileNameW(nullptr, modulePath, MAX_PATH) != 0) {
+    fs::path dir = fs::path(modulePath).parent_path();
+    candidates.insert(candidates.begin(), (dir / L"bin" / L"nord-confgen.exe").wstring());
+    candidates.insert(candidates.begin(), (dir / L"nord-confgen.exe").wstring());
+  }
+
+  for (const auto &cand : candidates) {
+    if (fs::exists(cand) && fs::is_regular_file(cand)) return cand;
+  }
+
+  return extractEmbeddedHelperExe(L"nord-confgen.exe", _binary_nord_confgen_exe_start, _binary_nord_confgen_exe_end);
+}
+
+inline fs::path protonSessionPath() {
+  wchar_t userProfile[MAX_PATH];
+  if (GetEnvironmentVariableW(L"USERPROFILE", userProfile, MAX_PATH) == 0) return fs::path();
+  return fs::path(userProfile) / PROTON_SESSION_FILE;
+}
+
+inline fs::path nordSessionPath() {
+  wchar_t userProfile[MAX_PATH];
+  if (GetEnvironmentVariableW(L"USERPROFILE", userProfile, MAX_PATH) == 0) return fs::path();
+  return fs::path(userProfile) / NORD_SESSION_FILE;
+}
+
+inline bool hasNordSession() {
+  fs::path p = nordSessionPath();
+  std::error_code ec;
+  return !p.empty() && fs::is_regular_file(p, ec);
+}
+
+inline VpnProvider savedSessionProvider() {
+  return newestSessionProvider(protonSessionPath(), nordSessionPath());
+}
+
+inline bool defaultConfExists() {
+  return fs::is_regular_file(getVpnConfigPath());
+}
+
+// Executa um utilitário via CreateProcessW (sem cmd.exe), entrega stdinData pela
+// entrada padrão e captura stdout+stderr linha a linha. Devolve o código de
+// saída ou -1 se o processo não pôde ser criado.
+inline int runHelperCapture(
+    const std::wstring &cmdLine,
+    const std::string &stdinData,
+    std::string &fullOutput,
+    const std::function<void(const std::string&)> &onLine = nullptr) {
+  // O conteúdo de stdin precisa caber no buffer do pipe (ver abaixo).
+  if (stdinData.size() > 2048) return -1;
+
+  SECURITY_ATTRIBUTES sa;
+  ZeroMemory(&sa, sizeof(sa));
+  sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+  sa.bInheritHandle = TRUE;
+
+  HANDLE hStdOutRead = NULL, hStdOutWrite = NULL;
+  HANDLE hStdInRead = NULL, hStdInWrite = NULL;
+  if (!CreatePipe(&hStdOutRead, &hStdOutWrite, &sa, 0)) return -1;
+  if (!CreatePipe(&hStdInRead, &hStdInWrite, &sa, 4096)) {
+    CloseHandle(hStdOutRead);
+    CloseHandle(hStdOutWrite);
+    return -1;
+  }
+  SetHandleInformation(hStdOutRead, HANDLE_FLAG_INHERIT, 0);
+  SetHandleInformation(hStdInWrite, HANDLE_FLAG_INHERIT, 0);
+
+  // Grava antes de criar o processo e fecha a ponta de escrita: o utilitário lê
+  // o conteúdo e recebe EOF em seguida, sem bloquear nenhum dos lados.
+  if (!stdinData.empty()) {
+    DWORD written = 0;
+    WriteFile(hStdInWrite, stdinData.data(), static_cast<DWORD>(stdinData.size()), &written, nullptr);
+  }
+  CloseHandle(hStdInWrite);
+
+  STARTUPINFOW si;
+  ZeroMemory(&si, sizeof(si));
+  si.cb = sizeof(si);
+  si.hStdInput = hStdInRead;
+  si.hStdOutput = hStdOutWrite;
+  si.hStdError = hStdOutWrite;
+  si.dwFlags |= STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+  si.wShowWindow = SW_HIDE;
+
+  PROCESS_INFORMATION pi;
+  ZeroMemory(&pi, sizeof(pi));
+
+  std::vector<wchar_t> cmdBuf(cmdLine.begin(), cmdLine.end());
+  cmdBuf.push_back(L'\0');
+
+  BOOL created = CreateProcessW(
+      nullptr,
+      cmdBuf.data(),
+      nullptr,
+      nullptr,
+      TRUE,
+      CREATE_NO_WINDOW,
+      nullptr,
+      nullptr,
+      &si,
+      &pi
+  );
+
+  CloseHandle(hStdOutWrite);
+  CloseHandle(hStdInRead);
+
+  if (!created) {
+    CloseHandle(hStdOutRead);
+    return -1;
+  }
+
+  char buffer[512];
+  DWORD bytesRead = 0;
+  std::string currentLine;
+
+  while (ReadFile(hStdOutRead, buffer, sizeof(buffer), &bytesRead, nullptr) && bytesRead > 0) {
+    fullOutput.append(buffer, bytesRead);
+
+    for (DWORD i = 0; i < bytesRead; ++i) {
+      char ch = buffer[i];
+      if (ch == '\n' || ch == '\r') {
+        if (!currentLine.empty()) {
+          if (onLine) onLine(currentLine);
+          currentLine.clear();
+        }
+      } else {
+        currentLine += ch;
+      }
+    }
+  }
+  if (!currentLine.empty() && onLine) onLine(currentLine);
+
+  CloseHandle(hStdOutRead);
+  WaitForSingleObject(pi.hProcess, 60000);
+
+  DWORD exitCode = 1;
+  GetExitCodeProcess(pi.hProcess, &exitCode);
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  return static_cast<int>(exitCode);
+}
+
+// Gera o perfil padrão pelo nord-confgen.exe. Com token faz o login na API
+// NordVPN; com token vazio reutiliza a chave NordLynx salva na sessão. O token
+// segue pela entrada padrão do utilitário e nunca aparece na linha de comando.
+inline bool runNordConfgen(
+    const std::string &token,
+    std::string *outErr = nullptr,
+    const std::function<void(const std::string&)> &onProgress = nullptr) {
+  std::wstring confgen = findNordConfgenExe();
+  if (confgen.empty()) {
+    if (outErr) *outErr = "Utilitário nord-confgen.exe não encontrado.";
+    return false;
+  }
+
+  std::string targetConf = getVpnConfigPath();
+  std::string countries = NORD_COUNTRIES;
+
+  std::wstring cmdLine = L"\"" + confgen + L"\" --countries " + std::wstring(countries.begin(), countries.end()) +
+                         L" --output \"" + fs::path(targetConf).wstring() + L"\"";
+  if (!token.empty()) cmdLine += L" --token-stdin";
+
+  std::string output;
+  int ret = runHelperCapture(cmdLine, token.empty() ? "" : token + "\n", output, [&](const std::string &line) {
+    if (!onProgress) return;
+    std::string step = confgenProgressMessage(line);
+    if (!step.empty()) onProgress(step);
+  });
+
+  if (ret != 0 || !fs::is_regular_file(targetConf)) {
+    if (outErr) *outErr = (ret == -1 && output.empty()) ? "Falha ao executar utilitário nord-confgen.exe." : nordErrorMessage(output);
+    return false;
+  }
+  return true;
+}
+
+// Fluxo de terminal (CLI) da NordVPN: reaproveita o perfil ou a sessão salva e
+// só pede o token de acesso quando não há outra forma (ou quando forceLogin).
+inline bool setupNordConfig(bool forceLogin = false) {
+  if (!forceLogin) {
+    if (defaultConfExists()) return true;
+    if (hasNordSession() && runNordConfgen("")) return true;
+  }
+
+  std::cout << "\n  \033[33m\033[1m[ Configuracao do Tunel WireGuard (NordVPN) ]\033[0m\n";
+  std::cout << "  Requer assinatura NordVPN ativa. Gere um token de acesso em:\n";
+  std::cout << "  " << NORD_TOKEN_URL << "\n";
+  std::cout << "  Token de acesso NordVPN: ";
+  std::cout.flush();
+
+  std::string token;
+  HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+  DWORD mode = 0;
+  GetConsoleMode(hStdin, &mode);
+  SetConsoleMode(hStdin, mode & (~ENABLE_ECHO_INPUT));
+  std::getline(std::cin, token);
+  SetConsoleMode(hStdin, mode);
+  std::cout << "\n";
+
+  token = trimWhitespace(token);
+  if (token.empty()) return false;
+
+  std::cout << "  Validando token e gerando tunel WireGuard exclusivo..." << std::endl;
+
+  std::string err;
+  bool ok = runNordConfgen(token, &err, [](const std::string &step) {
+    std::cout << "  " << step << std::endl;
+  });
+  if (!ok) {
+    std::cerr << "  \033[31m[ ✖ ] " << err << "\033[0m\n";
+    return false;
+  }
+
+  std::cout << "  \033[32m[ ✔ ] Configuracao NordVPN internacional gerada com sucesso!\033[0m\n";
+  return true;
+}
+
 inline bool ensureWireGuardWindows(const std::string &chosenConf = "") {
   if (!ensureWireSockInstalled()) {
     std::cerr << "[ERRO] Não foi possível encontrar ou instalar o WireSock no Windows." << std::endl;
@@ -620,11 +881,16 @@ inline bool ensureWireGuardWindows(const std::string &chosenConf = "") {
 
   std::string targetConf = chosenConf.empty() ? getVpnConfigPath() : chosenConf;
 
-  // Se o arquivo não existir e não for customizado, tenta setupProtonConfigWindows()
+  // Se o arquivo não existir e não for customizado, recria pela sessão NordVPN
+  // salva ou, nos demais casos, por setupProtonConfigWindows()
   if (!fs::is_regular_file(targetConf)) {
     if (chosenConf.empty()) {
       std::string err;
-      setupProtonConfigWindows(false, "", "", &err);
+      if (savedSessionProvider() == VpnProvider::Nord) {
+        runNordConfgen("", &err);
+      } else {
+        setupProtonConfigWindows(false, "", "", &err);
+      }
     } else {
       std::cerr << "[ERRO] Arquivo de configuração customizado não encontrado: " << chosenConf << std::endl;
       return false;

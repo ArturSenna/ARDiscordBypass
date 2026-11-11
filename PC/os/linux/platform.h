@@ -13,11 +13,17 @@
 #include <functional>
 
 #include <fcntl.h>
+#include <cerrno>
 #include <climits>
+#include <spawn.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#include "../../core/provider.h"
+
+extern char **environ;
 
 namespace fs = std::filesystem;
 
@@ -256,6 +262,10 @@ inline LaunchTarget locateDiscordLaunchTarget(const std::string &manualPath = ""
   for (const auto &[cmd, name] : binCandidates) {
     if (haveCommand(cmd)) {
       std::string path = runCommand("command -v " + cmd + " 2>/dev/null");
+      // Atalhos em /snap/bin são snaps: têm lançamento próprio (ver launchDiscord)
+      if (path.rfind("/snap/bin/", 0) == 0 || path.rfind("/var/lib/snapd/snap/bin/", 0) == 0) {
+        return {LaunchTargetType::Snap, "snap run " + fs::path(path).filename().string(), name + " (Snap)"};
+      }
       if (!path.empty()) {
         return {LaunchTargetType::NativeExe, path, name};
       }
@@ -359,7 +369,151 @@ inline std::string findProtonConfgen() {
 #endif
 }
 
-inline bool setupWireGuardFromConf(const std::string &confPath) {
+extern "C" const char _binary_nord_confgen_start[];
+extern "C" const char _binary_nord_confgen_end[];
+
+// Grava em ~/.local/share/ARDiscordBypass um utilitário embutido no executável.
+inline std::string extractEmbeddedHelperLinux(const std::string &name, const char *start, const char *end) {
+  size_t size = end - start;
+  if (size == 0) return "";
+
+  const char *home = std::getenv("HOME");
+  std::string targetDir = home ? (std::string(home) + "/.local/share/ARDiscordBypass") : "/tmp/ARDiscordBypass";
+
+  std::error_code ec;
+  fs::create_directories(targetDir, ec);
+  std::string outPath = targetDir + "/" + name;
+
+  if (fs::exists(outPath, ec) && fs::file_size(outPath, ec) == size) {
+    ::chmod(outPath.c_str(), 0755);
+    return outPath;
+  }
+
+  std::ofstream out(outPath, std::ios::binary);
+  if (!out.is_open()) return "";
+  out.write(start, size);
+  out.close();
+
+  ::chmod(outPath.c_str(), 0755);
+  return fs::exists(outPath, ec) ? outPath : "";
+}
+
+inline std::string findNordConfgen() {
+  char exePath[PATH_MAX];
+  ssize_t len = ::readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+  std::vector<std::string> paths = {
+    "./bin/nord-confgen",
+    "../bin/nord-confgen",
+    "PC/bin/nord-confgen",
+    "./nord-confgen",
+    "/usr/local/bin/nord-confgen"
+  };
+  if (len != -1) {
+    exePath[len] = '\0';
+    fs::path selfDir = fs::path(exePath).parent_path();
+    paths.insert(paths.begin(), (selfDir / "bin" / "nord-confgen").string());
+    paths.insert(paths.begin(), (selfDir / "nord-confgen").string());
+  }
+
+  for (const auto &p : paths) {
+    if (fs::is_regular_file(p)) return p;
+  }
+
+  return extractEmbeddedHelperLinux("nord-confgen", _binary_nord_confgen_start, _binary_nord_confgen_end);
+}
+
+inline fs::path protonSessionPath() {
+  const char *home = std::getenv("HOME");
+  return (home && *home) ? fs::path(home) / PROTON_SESSION_FILE : fs::path();
+}
+
+inline fs::path nordSessionPath() {
+  const char *home = std::getenv("HOME");
+  return (home && *home) ? fs::path(home) / NORD_SESSION_FILE : fs::path();
+}
+
+inline bool hasNordSession() {
+  fs::path p = nordSessionPath();
+  std::error_code ec;
+  return !p.empty() && fs::is_regular_file(p, ec);
+}
+
+inline VpnProvider savedSessionProvider() {
+  return newestSessionProvider(protonSessionPath(), nordSessionPath());
+}
+
+inline bool defaultConfExists() {
+  return fs::is_regular_file("ardc_vpn.conf");
+}
+
+// Executa um programa diretamente (sem shell; args[0] é procurado no PATH),
+// entrega stdinData pela entrada padrão e captura stdout+stderr linha a linha.
+// Devolve o código de saída ou -1.
+inline int runHelperCapture(
+    const std::vector<std::string> &args,
+    const std::string &stdinData,
+    std::string &fullOutput,
+    const std::function<void(const std::string&)> &onLine = nullptr) {
+  // O conteúdo de stdin precisa caber no buffer do pipe (64 KiB no Linux; ver abaixo).
+  if (args.empty() || stdinData.size() > 60 * 1024) return -1;
+
+  int inPipe[2] = {-1, -1};
+  int outPipe[2] = {-1, -1};
+  if (::pipe2(inPipe, O_CLOEXEC) != 0) return -1;
+  if (::pipe2(outPipe, O_CLOEXEC) != 0) {
+    ::close(inPipe[0]);
+    ::close(inPipe[1]);
+    return -1;
+  }
+
+  // Grava antes de criar o processo e fecha a ponta de escrita: o utilitário lê
+  // até EOF e, como a ponta de leitura ainda é nossa, não há risco de SIGPIPE.
+  if (!stdinData.empty()) {
+    ssize_t written = ::write(inPipe[1], stdinData.data(), stdinData.size());
+    (void)written;
+  }
+  ::close(inPipe[1]);
+
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  posix_spawn_file_actions_adddup2(&actions, inPipe[0], STDIN_FILENO);
+  posix_spawn_file_actions_adddup2(&actions, outPipe[1], STDOUT_FILENO);
+  posix_spawn_file_actions_adddup2(&actions, outPipe[1], STDERR_FILENO);
+
+  std::vector<char *> argv;
+  for (const auto &arg : args) argv.push_back(const_cast<char *>(arg.c_str()));
+  argv.push_back(nullptr);
+
+  pid_t pid = -1;
+  int rc = ::posix_spawnp(&pid, args[0].c_str(), &actions, nullptr, argv.data(), environ);
+  posix_spawn_file_actions_destroy(&actions);
+  ::close(inPipe[0]);
+  ::close(outPipe[1]);
+  if (rc != 0) {
+    ::close(outPipe[0]);
+    return -1;
+  }
+
+  FILE *out = ::fdopen(outPipe[0], "r");
+  if (out) {
+    char buffer[512];
+    while (fgets(buffer, sizeof(buffer), out) != nullptr) {
+      fullOutput += buffer;
+      if (onLine) onLine(trimWhitespace(buffer));
+    }
+    fclose(out);
+  } else {
+    ::close(outPipe[0]);
+  }
+
+  int status = 0;
+  while (::waitpid(pid, &status, 0) < 0) {
+    if (errno != EINTR) return -1;
+  }
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+inline bool setupWireGuardFromConf(const std::string &confPath, std::string *wgError = nullptr) {
   std::ifstream infile(confPath);
   if (!infile.is_open()) return false;
 
@@ -397,13 +551,19 @@ inline bool setupWireGuardFromConf(const std::string &confPath) {
     }
   }
 
-  std::string cleanTmp = "/tmp/wg-clean-" + std::to_string(getpid()) + ".conf";
-  std::ofstream outfile(cleanTmp);
-  for (const auto &cl : cleanLines) outfile << cl << "\n";
-  outfile.close();
+  // O perfil limpo chega ao wg por um pipe criado pelo shell root (mesma técnica
+  // do wg-quick), nunca por arquivo em /tmp: onde o wg roda confinado por
+  // AppArmor (ex.: Ubuntu 26.04) ele só pode ler arquivos em /etc/wireguard, e o
+  // setconf falhava em silêncio. De quebra a chave privada não passa por disco.
+  std::string cleanConf;
+  for (const auto &cl : cleanLines) cleanConf += cl + "\n";
 
-  std::system(("sudo wg setconf " + WG_IF + " " + cleanTmp + " >/dev/null 2>&1").c_str());
-  fs::remove(cleanTmp);
+  std::string wgOutput;
+  int wgRet = runHelperCapture({"sudo", "sh", "-c", "cat | wg setconf " + WG_IF + " /dev/stdin"}, cleanConf, wgOutput);
+  if (wgRet != 0) {
+    if (wgError) *wgError = trimWhitespace(wgOutput);
+    return false;
+  }
 
   std::system(("sudo ip link set " + WG_IF + " netns " + NETNS_NAME).c_str());
   if (address.find('/') == std::string::npos) address += "/32";
@@ -415,6 +575,29 @@ inline bool setupWireGuardFromConf(const std::string &confPath) {
 
   // Clamping de MSS para evitar queda de pacotes TLS maiores que o MTU
   std::system(("sudo ip netns exec " + NETNS_NAME + " iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o " + WG_IF + " -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true").c_str());
+
+  // DNS para apps em sandbox (Snap): o sandbox monta o /etc/resolv.conf do
+  // sistema, que costuma apontar para um resolvedor local (127.0.0.53 do
+  // systemd-resolved) que não existe dentro do namespace. As consultas DNS a
+  // endereços de loopback são redirecionadas para o primeiro DNS IPv4 do perfil.
+  std::string tunnelDns = "1.1.1.1";
+  {
+    std::stringstream dnsList(dns);
+    std::string candidate;
+    while (std::getline(dnsList, candidate, ',')) {
+      candidate = trimWhitespace(candidate);
+      if (!candidate.empty() && candidate.find_first_not_of("0123456789.") == std::string::npos) {
+        tunnelDns = candidate;
+        break;
+      }
+    }
+  }
+  const std::string inNetns = "sudo ip netns exec " + NETNS_NAME + " ";
+  std::system((inNetns + "sysctl -qw net.ipv4.conf.all.route_localnet=1 2>/dev/null || true").c_str());
+  for (const char *proto : {"udp", "tcp"}) {
+    std::system((inNetns + "iptables -t nat -A OUTPUT -d 127.0.0.0/8 -p " + proto + " --dport 53 -j DNAT --to-destination " + tunnelDns + ":53 2>/dev/null || true").c_str());
+  }
+  std::system((inNetns + "iptables -t nat -A POSTROUTING -o " + WG_IF + " -s 127.0.0.0/8 -j MASQUERADE 2>/dev/null || true").c_str());
 
   // Formatação robusta de resolv.conf com múltiplos DNS
   std::system(("sudo mkdir -p /etc/netns/" + NETNS_NAME).c_str());
@@ -567,7 +750,100 @@ inline bool setupProtonConfig(
   return true;
 }
 
-inline bool ensureWireGuardNetns(const std::string &confPath = "ardc_vpn.conf") {
+// Gera ardc_vpn.conf pelo nord-confgen. Com token faz o login na API NordVPN;
+// com token vazio reutiliza a chave NordLynx salva na sessão. O token segue
+// pela entrada padrão do utilitário e nunca aparece em argv ou em disco.
+inline bool runNordConfgen(
+    const std::string &token,
+    std::string *outErr = nullptr,
+    const std::function<void(const std::string&)> &onProgress = nullptr) {
+  std::string confgen = findNordConfgen();
+  if (confgen.empty()) {
+    if (outErr) *outErr = "Utilitário nord-confgen não encontrado.";
+    return false;
+  }
+
+  std::vector<std::string> args = {confgen, "--countries", NORD_COUNTRIES, "--output", "ardc_vpn.conf"};
+  if (!token.empty()) args.push_back("--token-stdin");
+
+  std::string output;
+  int ret = runHelperCapture(args, token.empty() ? "" : token + "\n", output, [&](const std::string &line) {
+    if (!onProgress) return;
+    std::string step = confgenProgressMessage(line);
+    if (!step.empty()) onProgress(step);
+  });
+
+  if (ret != 0 || !fs::is_regular_file("ardc_vpn.conf")) {
+    if (outErr) *outErr = (ret == -1 && output.empty()) ? "Erro ao executar utilitário nord-confgen." : nordErrorMessage(output);
+    return false;
+  }
+  return true;
+}
+
+// Fluxo de terminal (CLI) da NordVPN: reaproveita o perfil ou a sessão salva e
+// só pede o token de acesso quando não há outra forma (ou quando forceLogin).
+inline bool setupNordConfig(bool forceLogin = false) {
+  if (!forceLogin) {
+    if (fs::is_regular_file("ardc_vpn.conf")) return true;
+    if (hasNordSession() && runNordConfgen("")) return true;
+  }
+
+  std::cout << "\n  \033[38;2;255;214;0m\033[1m[ Configuração do Túnel WireGuard (NordVPN) ]\033[0m\n";
+  std::cout << "  Requer assinatura NordVPN ativa. Gere um token de acesso em:\n";
+  std::cout << "  " << NORD_TOKEN_URL << "\n";
+  std::cout << "  Token de acesso NordVPN: ";
+  std::cout.flush();
+
+  std::string token;
+  std::system("stty -echo");
+  std::getline(std::cin, token);
+  std::system("stty echo");
+  std::cout << "\n";
+
+  token = trimWhitespace(token);
+  if (token.empty()) return false;
+
+  std::cout << "  Validando token e gerando túnel WireGuard exclusivo..." << std::endl;
+
+  std::string err;
+  bool ok = runNordConfgen(token, &err, [](const std::string &step) {
+    std::cout << "  " << step << std::endl;
+  });
+  if (!ok) {
+    std::cerr << "  \033[38;2;229;9;20m✖\033[0m " << err << "\n";
+    return false;
+  }
+
+  std::cout << "  \033[38;2;0;230;118m✔\033[0m \033[1mConfiguração NordVPN internacional gerada com sucesso!\033[0m\n";
+  return true;
+}
+
+// Recria ardc_vpn.conf pela sessão salva do provedor, sem nenhuma interação.
+inline bool renewDefaultProfile(VpnProvider provider) {
+  if (provider == VpnProvider::Nord) {
+    return runNordConfgen("");
+  }
+  if (provider == VpnProvider::Proton) {
+    std::string confgen = findProtonConfgen();
+    if (confgen.empty()) return false;
+    std::string cmd = confgen + " --free-only --countries US,NL,JP --output ardc_vpn.conf </dev/null >/dev/null 2>&1";
+    return std::system(cmd.c_str()) == 0 && fs::is_regular_file("ardc_vpn.conf");
+  }
+  return false;
+}
+
+// Remove a interface recém-criada e explica por que o wg não aceitou o perfil.
+inline bool abortTunnelSetup(const std::string &wgError, std::string *outDetail) {
+  std::system(("sudo ip link del dev " + WG_IF + " 2>/dev/null || true").c_str());
+  if (outDetail) {
+    std::string reason = wgError;
+    for (char &c : reason) if (c == '\n' || c == '\r') c = ' ';
+    *outDetail = "wg setconf recusou o perfil" + (reason.empty() ? std::string() : ": " + reason);
+  }
+  return false;
+}
+
+inline bool ensureWireGuardNetns(const std::string &confPath = "ardc_vpn.conf", std::string *outDetail = nullptr) {
   std::system("sudo modprobe wireguard >/dev/null 2>&1 || true");
 
   // Limpeza prévia para não deixar conflito de namespace ou interface
@@ -579,10 +855,16 @@ inline bool ensureWireGuardNetns(const std::string &confPath = "ardc_vpn.conf") 
   std::system(("sudo ip link add dev " + WG_IF + " type wireguard").c_str());
 
   if (!fs::is_regular_file(confPath)) {
-    return false;
+    // Perfil padrão ausente: recria pela sessão salva (ProtonVPN ou NordVPN)
+    if (confPath != "ardc_vpn.conf" || !renewDefaultProfile(savedSessionProvider())) {
+      return false;
+    }
   }
 
-  setupWireGuardFromConf(confPath);
+  std::string wgError;
+  if (!setupWireGuardFromConf(confPath, &wgError)) {
+    return abortTunnelSetup(wgError, outDetail);
+  }
 
   // Aquecimento do túnel: envia pacote para forçar o handshake inicial do WireGuard
   std::system(("sudo ip netns exec " + NETNS_NAME + " ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 || true").c_str());
@@ -616,21 +898,19 @@ inline bool ensureWireGuardNetns(const std::string &confPath = "ardc_vpn.conf") 
     return false;
   }
 
-  // Auto-recuperação: se a rota expirou, tenta renovar via proton-confgen se houver sessão
-  std::string confgen = findProtonConfgen();
-  if (!confgen.empty()) {
-    std::string cmd = confgen + " --free-only --countries US,NL,JP --output ardc_vpn.conf >/dev/null 2>&1";
-    int ret = std::system(cmd.c_str());
-    if (ret == 0 && fs::is_regular_file("ardc_vpn.conf")) {
-      std::system(("sudo ip -n " + NETNS_NAME + " link del dev " + WG_IF + " 2>/dev/null || true").c_str());
-      std::system(("sudo ip link del dev " + WG_IF + " 2>/dev/null || true").c_str());
-      std::system(("sudo ip link add dev " + WG_IF + " type wireguard").c_str());
-      setupWireGuardFromConf("ardc_vpn.conf");
-      std::system(("sudo ip netns exec " + NETNS_NAME + " ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 || true").c_str());
-      std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-      testDiscord = runCommand("sudo ip netns exec " + NETNS_NAME + " curl -s -m 5 https://discord.com/api/v9/gateway 2>/dev/null");
-      return testDiscord.find("gateway") != std::string::npos;
+  // Auto-recuperação: se a rota expirou, renova o perfil pelo provedor que o gerou.
+  // Perfis sem cabeçalho de gerador foram trazidos pelo usuário e não são sobrescritos.
+  if (renewDefaultProfile(detectConfProvider("ardc_vpn.conf"))) {
+    std::system(("sudo ip -n " + NETNS_NAME + " link del dev " + WG_IF + " 2>/dev/null || true").c_str());
+    std::system(("sudo ip link del dev " + WG_IF + " 2>/dev/null || true").c_str());
+    std::system(("sudo ip link add dev " + WG_IF + " type wireguard").c_str());
+    if (!setupWireGuardFromConf("ardc_vpn.conf", &wgError)) {
+      return abortTunnelSetup(wgError, outDetail);
     }
+    std::system(("sudo ip netns exec " + NETNS_NAME + " ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 || true").c_str());
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    testDiscord = runCommand("sudo ip netns exec " + NETNS_NAME + " curl -s -m 5 https://discord.com/api/v9/gateway 2>/dev/null");
+    return testDiscord.find("gateway") != std::string::npos;
   }
 
   return false;
@@ -707,12 +987,27 @@ inline bool launchDiscord(const LaunchTarget &target) {
     envVars << "XDG_SESSION_TYPE=" << sessionType << " ";
   }
 
+  // Snaps não iniciam sob "ip netns exec": ele troca também o namespace de
+  // montagem e esconde /sys/fs/cgroup, e o "snap run" aborta com "cannot find
+  // tracking cgroup". O nsenter troca apenas o namespace de rede.
+  std::string enterNetns = "ip netns exec " + NETNS_NAME;
+  if (target.type == LaunchTargetType::Snap && haveCommand("nsenter")) {
+    enterNetns = "nsenter --net=/run/netns/" + NETNS_NAME;
+  }
+
   std::ostringstream cmd;
-  cmd << "sudo ip netns exec " << NETNS_NAME << " setsid -f sudo -u " << user << " env "
+  cmd << "sudo " << enterNetns << " setsid -f sudo -u " << user << " env "
       << envVars.str()
       << target.command << " >/dev/null 2>&1";
 
   int ret = std::system(cmd.str().c_str());
+  if (ret != 0) return false;
+
+  // Snaps e Flatpaks montam o sandbox antes de o processo do Discord aparecer:
+  // além dos 2 segundos de sempre, espera até mais 10.
   std::this_thread::sleep_for(std::chrono::seconds(2));
-  return ret == 0 && isDiscordRunning();
+  for (int i = 0; i < 20 && !isDiscordRunning(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  }
+  return isDiscordRunning();
 }

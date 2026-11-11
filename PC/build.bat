@@ -20,13 +20,14 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo [1/3] Embutindo proton-confgen.exe...
+echo [1/3] Embutindo proton-confgen.exe e nord-confgen.exe...
 cd bin
 objcopy -I binary -O pe-x86-64 -B i386:x86-64 proton-confgen.exe ..\proton_confgen_embed.o
+objcopy -I binary -O pe-x86-64 -B i386:x86-64 nord-confgen.exe ..\nord_confgen_embed.o
 cd ..
 
 echo [2/3] Compilando CLI: ARDiscordBypass.exe...
-g++ -O3 -std=c++20 -static -static-libgcc -static-libstdc++ main.cpp proton_confgen_embed.o -lws2_32 -lwinhttp -o ARDiscordBypass.exe
+g++ -O3 -std=c++20 -static -static-libgcc -static-libstdc++ main.cpp proton_confgen_embed.o nord_confgen_embed.o -lws2_32 -lwinhttp -o ARDiscordBypass.exe
 strip ARDiscordBypass.exe 2>nul
 
 if %errorlevel% neq 0 (
@@ -41,6 +42,7 @@ if "%BUILD_GUI%"=="1" (
         gui/main.cpp ^
         gui/app_window.cpp ^
         proton_confgen_embed.o ^
+        nord_confgen_embed.o ^
         gui/vendor/imgui/imgui.cpp ^
         gui/vendor/imgui/imgui_draw.cpp ^
         gui/vendor/imgui/imgui_tables.cpp ^

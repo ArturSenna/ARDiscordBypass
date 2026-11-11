@@ -246,11 +246,25 @@ bool checkForUpdate() {
   return false;
 }
 
+// Primeira execução sem perfil nem sessão salva: pergunta qual provedor usar.
+static VpnProvider promptProviderChoice() {
+  std::cout << "\n  " << UI::YELLOW << UI::BOLD << "[ Provedor do Túnel WireGuard ]" << UI::RESET << "\n"
+            << "  " << UI::GREEN << "1)" << UI::RESET << " ProtonVPN  - gratuito (usuário e senha da conta Proton)\n"
+            << "  " << UI::GREEN << "2)" << UI::RESET << " NordVPN    - assinatura ativa (token de acesso do Nord Account)\n"
+            << "  Escolha [1/2] (padrão 1): ";
+  std::cout.flush();
+
+  std::string choice;
+  std::getline(std::cin, choice);
+  return trimWhitespace(choice) == "2" ? VpnProvider::Nord : VpnProvider::Proton;
+}
+
 inline int runCliMain(int argc, char *argv[]) {
   UI::initConsole();
 
   bool stopRequested = false;
   bool wantLogin = false;
+  bool wantNordLogin = false;
   bool showHelp = false;
   std::string customConfigFile = "";
   std::string manualDiscordArg = "";
@@ -263,6 +277,8 @@ inline int runCliMain(int argc, char *argv[]) {
       stopRequested = true;
     } else if (arg == "-l" || arg == "-login" || arg == "--login" || arg == "--proton") {
       wantLogin = true;
+    } else if (arg == "-nord" || arg == "--nord" || arg == "--nordvpn") {
+      wantNordLogin = true;
     } else if (arg == "-cfg" || arg == "--cfg" || arg == "-c" || arg == "--config") {
       if (i + 1 < argc) {
         customConfigFile = argv[++i];
@@ -293,6 +309,8 @@ inline int runCliMain(int argc, char *argv[]) {
               << "      Utiliza um arquivo de perfil WireGuard (.conf) customizado em vez do padrão.\n\n"
               << "  " << UI::GREEN << "-l,    --login" << UI::RESET << " (ou --proton)\n"
               << "      Força nova autenticação na API do ProtonVPN para gerar outro túnel.\n\n"
+              << "  " << UI::GREEN << "--nord" << UI::RESET << " (ou --nordvpn)\n"
+              << "      Gera o túnel pela NordVPN (assinatura ativa) usando um token de acesso.\n\n"
               << "  " << UI::GREEN << "--cli" << UI::RESET << "\n"
               << "      Força execução no terminal (CLI) mesmo quando compilado com GUI embutida.\n\n"
               << "  " << UI::GREEN << "-h,    --help" << UI::RESET << "\n"
@@ -301,7 +319,8 @@ inline int runCliMain(int argc, char *argv[]) {
               << "  " << argv[0] << "                       # Inicia normalmente (ProtonVPN / padrão)\n"
               << "  " << argv[0] << " -stop                 # Encerra o Discord e remove o túnel\n"
               << "  " << argv[0] << " -cfg ./minha_vpn.conf  # Conecta usando um perfil WireGuard específico\n"
-              << "  " << argv[0] << " -l                    # Força novo login no ProtonVPN\n\n";
+              << "  " << argv[0] << " -l                    # Força novo login no ProtonVPN\n"
+              << "  " << argv[0] << " --nord                # Gera o túnel pela NordVPN (token de acesso)\n\n";
     return 0;
   }
 
@@ -453,28 +472,44 @@ inline int runCliMain(int argc, char *argv[]) {
   std::string activeConfig = customConfigFile.empty() ? "ardc_vpn.conf" : customConfigFile;
 
   if (customConfigFile.empty()) {
-    if (!fs::is_regular_file("ardc_vpn.conf") || wantLogin) {
+    // Provedor do perfil padrão: o pedido na linha de comando tem prioridade;
+    // sem perfil, vale a sessão salva mais recente ou a escolha do usuário.
+    VpnProvider provider = VpnProvider::None;
+    if (wantNordLogin) {
+      provider = VpnProvider::Nord;
+    } else if (wantLogin) {
+      provider = VpnProvider::Proton;
+    } else if (!defaultConfExists()) {
+      provider = savedSessionProvider();
+      if (provider == VpnProvider::None) provider = promptProviderChoice();
+    }
+
+    bool profileOk = true;
+    if (provider == VpnProvider::Nord) {
+      profileOk = setupNordConfig(wantNordLogin);
+    } else if (provider == VpnProvider::Proton) {
 #ifndef _WIN32
-      if (!setupProtonConfig(wantLogin)) {
-        UI::error("Não foi possível configurar o perfil WireGuard.");
-        return 1;
-      }
+      profileOk = setupProtonConfig(wantLogin);
 #else
-      if (!setupProtonConfigWindows(wantLogin)) {
-        UI::error("Não foi possível configurar o perfil WireGuard.");
-        return 1;
-      }
+      profileOk = setupProtonConfigWindows(wantLogin);
 #endif
+    }
+
+    if (!profileOk) {
+      UI::error("Não foi possível configurar o perfil WireGuard.");
+      return 1;
     }
   }
 
 #ifndef _WIN32
+  std::string tunnelDetail;
   bool tunnelOk = UI::spinner("Criando túnel WireGuard dedicado (Namespace seguro)", [&]() {
-    return ensureWireGuardNetns(activeConfig);
+    return ensureWireGuardNetns(activeConfig, &tunnelDetail);
   });
 
   if (!tunnelOk) {
     UI::error("Falha ao inicializar o túnel WireGuard isolado.");
+    if (!tunnelDetail.empty()) UI::info(tunnelDetail);
     return 1;
   }
 

@@ -17,18 +17,21 @@
    - [3.5 Edição Gráfica (Dear ImGui + OpenGL)](#35-edição-gráfica-dear-imgui--opengl)
    - [3.6 Arquitetura de Binário Único Autocontido (`Embedded Binary Auto-Extraction`)](#36-arquitetura-de-binário-único-autocontido-embedded-binary-auto-extraction)
    - [3.7 Handshake SRP, Normalização de Credenciais & Mapeamento de Erros](#37-handshake-srp-normalização-de-credenciais--mapeamento-de-erros)
+   - [3.8 Provedor NordVPN (`nord-confgen`)](#38-provedor-nordvpn-nord-confgen)
 4. [Módulo Mobile](#4-módulo-mobile)
    - [4.1 Android — VpnService com GoBackend WireGuard](#41-android--vpnservice-com-gobackend-wireguard)
    - [4.2 Split-Tunneling por Identificador de Pacote](#42-split-tunneling-por-identificador-de-pacote)
    - [4.3 Quick Settings Tile & Atualizador Assíncrono](#43-quick-settings-tile--atualizador-assíncrono)
    - [4.4 Autenticação Proton In-App via Biblioteca Nativa (`libprotonconfgen.so`)](#44-autenticação-proton-in-app-via-biblioteca-nativa-libprotonconfgenso--100-open-source)
-   - [4.5 Futuro: iOS Engine (NetworkExtension)](#45-futuro-ios-engine-networkextension)
+   - [4.5 NordVPN no Android (`libnordconfgen.so`)](#45-nordvpn-no-android-libnordconfgenso)
+   - [4.6 Futuro: iOS Engine (NetworkExtension)](#46-futuro-ios-engine-networkextension)
 5. [Infraestrutura do Túnel & Criptografia](#5-infraestrutura-do-túnel--criptografia)
 6. [Instruções de Compilação & Build](#6-instruções-de-compilação--build)
    - [6.1 Build Linux nativo com CMake & Objcopy](#61-build-linux-nativo-com-cmake--objcopy)
    - [6.2 Cross-compile MinGW para Windows com Objeto Embutido](#62-cross-compile-mingw-para-windows-com-objeto-embutido)
    - [6.3 Build do APK Android](#63-build-do-apk-android)
    - [6.4 Compilação do Motor Go para Android (`libprotonconfgen.so`)](#64-compilação-do-motor-go-para-android-libprotonconfgenso)
+   - [6.5 Compilação do Gerador NordVPN (`nord-confgen`)](#65-compilação-do-gerador-nordvpn-nord-confgen)
 7. [Segurança, Antiban e Relatórios VirusTotal](#7-segurança-antiban-e-relatórios-virustotal)
 8. [Licença & Termos de Uso](#8-licença--termos-de-uso)
 
@@ -87,9 +90,12 @@ ARDiscordBypass/
 │   ├── main.cpp                # Ponto de entrada, verificador e renderizador CLI
 │   ├── ui.h                    # Paleta TrueColor ANSI, Braille spinners e responsividade
 │   ├── core/service.h          # Gerenciador de túnel, resolução multi-path e processos
+│   ├── core/provider.h         # Definições comuns dos provedores (ProtonVPN / NordVPN)
 │   ├── bin/                    # Binários auxiliares utilizados na etapa de build/linkagem
 │   │   ├── proton-confgen      # Binário ELF x86_64 para linkagem estática no Linux
 │   │   ├── proton-confgen.exe  # Binário PE x64 para linkagem estática no Windows
+│   │   ├── nord-confgen        # Gerador NordVPN (ELF x86_64) embutido no Linux
+│   │   ├── nord-confgen.exe    # Gerador NordVPN (PE x64) embutido no Windows
 │   │   ├── wiresock-client.exe # Cliente de injeção WFP WireGuard para Windows
 │   │   └── ws_driver.sys       # Driver de kernel de filtragem WFP
 │   ├── gui/                    # Interface gráfica OpenGL Dear ImGui (Dark/Light)
@@ -102,13 +108,17 @@ ARDiscordBypass/
 │       └── windows/platform.h  # CreateProcessW nativo, auto-extração (%LOCALAPPDATA%) e WFP WireSock
 │
 ├── tools/                      # Ferramentas Auxiliares de Código Aberto
-│   └── proton-confgen/         # Código-Fonte do Motor Proton / SRP (Go 1.22+)
-│       ├── Makefile            # Automação de builds multi-plataforma
-│       ├── cmd/protonvpn-wg/   # Ponto de entrada CLI (main.go com DNS fallback)
-│       ├── internal/auth/      # Handshake SRP oficial da Proton e renovação de sessão
-│       ├── internal/api/       # Transporte HTTP/TLS com emulação uTLS
-│       ├── internal/vpn/       # Descoberta de servidores internacionais gratuitos
-│       └── internal/wireguard/ # Geração de chaves Curve25519 e perfil ardc_vpn.conf
+│   ├── proton-confgen/         # Código-Fonte do Motor Proton / SRP (Go 1.22+)
+│   │   ├── Makefile            # Automação de builds multi-plataforma
+│   │   ├── cmd/protonvpn-wg/   # Ponto de entrada CLI (main.go com DNS fallback)
+│   │   ├── internal/auth/      # Handshake SRP oficial da Proton e renovação de sessão
+│   │   ├── internal/api/       # Transporte HTTP/TLS com emulação uTLS
+│   │   ├── internal/vpn/       # Descoberta de servidores internacionais gratuitos
+│   │   └── internal/wireguard/ # Geração de chaves Curve25519 e perfil ardc_vpn.conf
+│   └── nord-confgen/           # Código-Fonte do Gerador NordVPN (Go 1.22+, só biblioteca padrão)
+│       ├── main.go             # Token -> chave NordLynx, escolha de servidor e perfil
+│       ├── resolver.go         # Fallback de DNS para ambientes sem /etc/resolv.conf (Android)
+│       └── main_test.go        # Testes com API NordVPN simulada
 │
 └── Mobile/                     # Soluções Mobile Nativas
     └── Android/                # App Android (Kotlin, Jetpack, WireGuard GoBackend)
@@ -117,12 +127,14 @@ ARDiscordBypass/
         │   └── src/main/
         │       ├── AndroidManifest.xml
         │       ├── jniLibs/arm64-v8a/
-        │       │   └── libprotonconfgen.so         # Binário nativo compilado de tools/proton-confgen
+        │       │   ├── libprotonconfgen.so         # Binário nativo compilado de tools/proton-confgen
+        │       │   └── libnordconfgen.so           # Binário nativo compilado de tools/nord-confgen
         │       ├── java/com/alrigroup/ardcb/
         │       │   ├── MainActivity.kt             # Terminal interativo OLED, abas e diálogos
         │       │   ├── service/DiscordVpnService.kt# VpnService em primeiro plano
         │       │   ├── tunnel/WireGuardConfigManager.kt # Split-tunneling por UID
         │       │   ├── tunnel/ProtonAuthManager.kt # Orquestrador nativo do gerador Go
+        │       │   ├── tunnel/NordAuthManager.kt   # Orquestrador do gerador NordVPN (token via stdin)
         │       │   ├── tile/BypassQuickTile.kt     # Botão nas Configurações Rápidas
         │       │   └── updater/UpdateChecker.kt    # Validador de releases assíncrono
         │       └── res/                            # Layouts terminal, cores e temas
@@ -148,12 +160,16 @@ No Linux, a técnica padrão de VPN altera a tabela de roteamento da máquina (`
    ```
 3. **Endereçamento e Roteamento Dedicado**:
    Dentro do namespace, atribui-se o IP privado `10.7.0.2/24` e define-se a rota padrão para a interface WireGuard.
-4. **Execução sem Vazamento**:
+4. **Aplicação do Perfil sem Arquivo Temporário (compatível com AppArmor)**:
+   As chaves e o peer são aplicados com `wg setconf wg-ardc /dev/stdin`, com o perfil entregue por um pipe criado pelo shell root (`sudo sh -c 'cat | wg setconf ...'`, a mesma técnica do `wg-quick`). Em distribuições onde o `wg` roda confinado por AppArmor (ex.: Ubuntu 26.04) ele só pode ler arquivos em `/etc/wireguard/`; um perfil gravado em `/tmp` era recusado e o túnel subia sem chave nem peer. Se o `wg` recusar o perfil, a ativação falha na hora e a mensagem dele aparece no erro.
+5. **Execução sem Vazamento**:
    O binário do Discord (nativo, Flatpak ou Snap) é lançado dentro do namespace via:
    ```bash
    ip netns exec ar-discord-vpn sudo -u $USUARIO_REAL env ... discord
    ```
    Dessa forma, **apenas o Discord** e seus subprocessos Electron navegam pelo túnel; todos os demais softwares do Linux continuam conectados via Ethernet/Wi-Fi normal.
+6. **Discord em Snap**:
+   Um snap não inicia sob `ip netns exec`, que troca também o namespace de montagem e esconde `/sys/fs/cgroup` (o `snap run` aborta com `cannot find tracking cgroup`). Para alvos Snap (inclusive o atalho `/snap/bin/discord` encontrado no `PATH`) o lançamento usa `nsenter --net=/run/netns/ar-discord-vpn`, que troca apenas o namespace de rede. Como o sandbox do snap enxerga o `/etc/resolv.conf` do sistema (em geral `127.0.0.53`), o namespace redireciona por NAT (`route_localnet` + `DNAT`/`MASQUERADE`) as consultas DNS feitas a endereços de loopback para o primeiro DNS do perfil.
 
 ### 3.2 Windows — Windows Filtering Platform (WFP) & Execução Segura (`CreateProcessW`)
 
@@ -194,6 +210,9 @@ O ponto de entrada `PC/main.cpp` processa argumentos de linha de comando:
 - `-stop`, `--stop`: Executa `stopBypass()`, enviando sinais de terminação a processos órfãos (`ip netns pids`), eliminando instâncias do Discord, destruindo interfaces `wg-ardc`, removendo o namespace `ar-discord-vpn` (ou o serviço WireSock no Windows) e limpando travas singleton (`SingletonLock`, `SingletonCookie`, `SingletonSocket`).
 - `-cfg <path>`, `--config <path>`: Permite apontar para qualquer arquivo de configuração WireGuard arbitrário, ignorando a renovação automática da ProtonVPN e injetando as diretivas necessárias de interface e MTU.
 - `-l`, `--login`, `--proton`: Força reautenticação interativa via SRP com o utilitário `proton-confgen`.
+- `--nord`, `--nordvpn`: Gera o perfil pela NordVPN, pedindo um token de acesso (entrada oculta) e acionando o `nord-confgen`.
+
+Sem perfil `ardc_vpn.conf` e sem argumentos, o provedor é o da sessão salva mais recente (`~/.protonvpn-session.json` ou `~/.nordvpn-session.json`); sem nenhuma sessão, o assistente pergunta entre ProtonVPN (padrão) e NordVPN.
 - `-h`, `--help`: Exibe a especificação de sintaxe e exemplos de uso.
 
 ### 3.5 Edição Gráfica (Dear ImGui + OpenGL)
@@ -284,6 +303,40 @@ A comunicação com os servidores de identidade da ProtonVPN segue o protocolo c
 3. **Resolução de Perfil Multi-Path & Persistência Anual**:
    - O arquivo de configuração gerado `ardc_vpn.conf` é sincronizado automaticamente entre a pasta de trabalho atual e o diretório de execução.
    - O token da sessão SRP é gravado em `~/.protonvpn-session.json` (`%USERPROFILE%\.protonvpn-session.json`), com permissões restritas e validade de até 1 ano (ex: 2027), eliminando a necessidade de re-digitar credenciais em cada inicialização.
+
+### 3.8 Provedor NordVPN (`nord-confgen`)
+
+A NordVPN é um segundo provedor para o perfil padrão `ardc_vpn.conf`, ao lado da ProtonVPN. Ela **não possui plano gratuito**: o usuário precisa de assinatura ativa. O restante do pipeline (namespace no Linux, WireSock no Windows, GoBackend no Android) é o mesmo, pois o servidor NordLynx aceita clientes WireGuard padrão.
+
+1. **Autenticação por Token de Acesso**:
+   A NordVPN não expõe login por usuário e senha para clientes de terceiros. O usuário gera um token em *Nord Account → NordVPN → Configuração manual* e o informa ao aplicativo. O token é usado uma única vez em `GET https://api.nordvpn.com/v1/users/services/credentials` (HTTP Basic, usuário literal `token`) para obter a chave privada NordLynx da conta.
+   > Esse endpoint não faz parte de uma API pública documentada pela NordVPN e pode mudar. Se deixar de funcionar, o `.conf` WireGuard oficial baixado no Nord Account continua utilizável via `-cfg` / perfil customizado.
+2. **Tratamento do Segredo**:
+   - O token é entregue ao `nord-confgen` pela **entrada padrão** (`--token-stdin`): não aparece em `argv` nem em variáveis de ambiente, e nunca é gravado em disco ou em log. No Linux o processo é criado com `posix_spawn` (sem shell); no Windows com `CreateProcessW` e um pipe anônimo dedicado para `stdin`.
+   - Apenas a **chave NordLynx** é persistida, em `~/.nordvpn-session.json` (`%USERPROFILE%\.nordvpn-session.json`), com permissão `0600`. Ela basta para gerar novos perfis, já que a lista de servidores é pública.
+3. **Seleção de Servidor**:
+   `GET /v1/servers/recommendations` com filtro `wireguard_udp` e país. Os países `US,NL,JP` (constante `NORD_COUNTRIES` em `core/provider.h`) são tentados em ordem de preferência; vale o primeiro com servidor online. Sem filtro de país a API recomenda o servidor mais próximo, que para usuários no Brasil seria brasileiro, por isso o país é sempre fixado.
+4. **Perfil Gerado**:
+   ```ini
+   # NordVPN WireGuard Configuration
+   [Interface]
+   PrivateKey = <chave NordLynx da conta>
+   Address = 10.5.0.2/32
+   DNS = 103.86.96.100, 103.86.99.100
+
+   [Peer]
+   PublicKey = <chave pública do servidor>
+   AllowedIPs = 0.0.0.0/0
+   Endpoint = <IP do servidor>:51820
+   PersistentKeepalive = 25
+   ```
+   Chaves, IP e hostname vindos da API são validados antes de serem gravados; um servidor com campo fora do formato é descartado.
+5. **Identificação do Provedor e Renovação Automática**:
+   A primeira linha de comentário do perfil identifica quem o gerou (`# NordVPN ...` ou `# ProtonVPN ...`). Na auto-recuperação do túnel (Linux), o perfil é renovado pelo gerador correspondente; perfis **sem** esse cabeçalho foram trazidos pelo usuário e não são sobrescritos. Se o perfil padrão estiver ausente mas houver sessão salva, ele é recriado pela sessão mais recente.
+6. **Mapeamento de Erros**:
+   - `invalid or expired access token (HTTP 401)`: *"Token de acesso NordVPN inválido ou expirado. Gere um novo token no Nord Account."*
+   - `account has no NordLynx key`: *"A conta não retornou chave NordLynx. Verifique se a assinatura NordVPN está ativa."*
+   - Falha de rede: *"Falha de comunicação com a API NordVPN. Verifique sua conexão com a internet."*
 
 ---
 
@@ -377,7 +430,11 @@ func init() {
 }
 ```
 
-### 4.5 Futuro: iOS Engine (NetworkExtension)
+### 4.5 NordVPN no Android (`libnordconfgen.so`)
+
+O `NordAuthManager.kt` executa o `libnordconfgen.so` (compilado de `tools/nord-confgen/`, empacotado em `jniLibs/arm64-v8a/` pelos mesmos motivos de W^X descritos na seção 4.4) via `ProcessBuilder`, escrevendo o token de acesso na entrada padrão do processo. O perfil é gravado em `filesDir/ardc_vpn.conf` e a chave NordLynx em `filesDir/.nordvpn-session.json`. Como o Android não tem `/etc/resolv.conf`, o gerador detecta a ausência do arquivo e resolve nomes diretamente em `1.1.1.1` / `8.8.8.8`. A opção aparece na aba **CONFIGURAÇÕES** e no assistente inicial, entre a conta Proton e a importação de `.conf`.
+
+### 4.6 Futuro: iOS Engine (NetworkExtension)
 
 A estrutura de pastas `Mobile/` foi projetada para receber o projeto Swift/Xcode utilizando `NETunnelProvider` com motor WireGuardKit para iOS.
 
@@ -391,12 +448,12 @@ A estrutura de pastas `Mobile/` foi projetada para receber o projeto Swift/Xcode
 | **Criptografia Simétrica** | ChaCha20 com autenticação Poly1305 (RFC 7539) |
 | **Troca de Chaves** | Curve25519 (ECDH) com pares de chaves exclusivos |
 | **Função de Hash** | BLAKE2s |
-| **Endpoint do Gateway** | Dinâmico (ProtonVPN US/NL/JP) ou definido em `ardc_vpn.conf` |
+| **Endpoint do Gateway** | Dinâmico (ProtonVPN ou NordVPN, US/NL/JP) ou definido em `ardc_vpn.conf` |
 | **MTU** | 1280 (Garante passagem sem fragmentação) com TCP MSS Clamping |
 | **Keepalive** | 25 segundos |
-| **Autenticação de Sessão** | Tokens locais em `~/.protonvpn-session.json` (permissão `0600`) |
+| **Autenticação de Sessão** | Tokens locais em `~/.protonvpn-session.json` ou chave NordLynx em `~/.nordvpn-session.json` (permissão `0600`) |
 
-O sistema não utiliza chaves globais ou credenciais embutidas no código para mitigar riscos de colisão de pacotes, saturação de tráfego e bloqueios de infraestrutura. Cada usuário gera seu próprio túnel internacional gratuito através da API ProtonVPN ou utiliza sua configuração WireGuard pessoal.
+O sistema não utiliza chaves globais ou credenciais embutidas no código para mitigar riscos de colisão de pacotes, saturação de tráfego e bloqueios de infraestrutura. Cada usuário gera seu próprio túnel internacional gratuito através da API ProtonVPN, pela sua assinatura NordVPN, ou utiliza sua configuração WireGuard pessoal.
 
 ---
 
@@ -406,7 +463,7 @@ O sistema não utiliza chaves globais ou credenciais embutidas no código para m
 
 Requisitos: GCC 11+ ou Clang 13+ com suporte a C++20, CMake 3.16+, binutils (`objcopy`), e opcionalmente `libglfw3` (`libglfw3-dev` no Ubuntu/Debian, `glfw` no Arch) e OpenGL caso compile a interface gráfica.
 
-O script `build.sh` e o `CMakeLists.txt` cuidam automaticamente de converter o binário `bin/proton-confgen` em objeto ELF embutido (`proton_confgen_embed.o`) e linká-lo diretamente aos executáveis finais:
+O script `build.sh` e o `CMakeLists.txt` cuidam automaticamente de converter os binários `bin/proton-confgen` e `bin/nord-confgen` em objetos ELF embutidos (`proton_confgen_embed.o` e `nord_confgen_embed.o`) e linká-los diretamente aos executáveis finais:
 
 **Modo Padrão (Apenas CLI ultra-leve):**
 ```bash
@@ -436,10 +493,11 @@ cmake --build build --parallel
 
 No Linux (com `mingw-w64` instalado) ou no Windows nativo (via `build.bat`):
 
-**Passo 1: Converter o utilitário Go em Objeto PE-COFF x64:**
+**Passo 1: Converter os utilitários Go em Objetos PE-COFF x64:**
 ```bash
 cd PC/bin
 x86_64-w64-mingw32-objcopy -I binary -O pe-x86-64 -B i386:x86-64 proton-confgen.exe ../proton_confgen_embed.o
+x86_64-w64-mingw32-objcopy -I binary -O pe-x86-64 -B i386:x86-64 nord-confgen.exe ../nord_confgen_embed.o
 cd ..
 ```
 
@@ -447,7 +505,7 @@ cd ..
 ```bash
 x86_64-w64-mingw32-g++ -std=c++20 -O3 \
   -static -static-libgcc -static-libstdc++ \
-  -I. main.cpp proton_confgen_embed.o \
+  -I. main.cpp proton_confgen_embed.o nord_confgen_embed.o \
   -o ../ARDiscordBypass.exe \
   -lws2_32 -lwinhttp
 x86_64-w64-mingw32-strip ../ARDiscordBypass.exe
@@ -458,7 +516,7 @@ x86_64-w64-mingw32-strip ../ARDiscordBypass.exe
 x86_64-w64-mingw32-g++ -std=c++20 -O3 \
   -static -static-libgcc -static-libstdc++ \
   gui/main.cpp gui/app_window.cpp \
-  proton_confgen_embed.o \
+  proton_confgen_embed.o nord_confgen_embed.o \
   gui/vendor/imgui/*.cpp \
   gui/vendor/imgui/backends/imgui_impl_win32.cpp \
   gui/vendor/imgui/backends/imgui_impl_opengl3.cpp \
@@ -507,6 +565,25 @@ file libprotonconfgen.so
 
 readelf -h libprotonconfgen.so
 # Retorno esperado: Machine: AArch64, OS/ABI: UNIX - System V
+```
+
+### 6.5 Compilação do Gerador NordVPN (`nord-confgen`)
+
+Requisitos: Go 1.22+. O módulo usa apenas a biblioteca padrão (nenhuma dependência é baixada).
+
+```bash
+cd tools/nord-confgen
+
+# Testes (API NordVPN simulada, sem rede)
+go test ./...
+
+# Linux x86_64 e Windows x64: insumos do embedding em PC/bin/
+CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ../../PC/bin/nord-confgen .
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ../../PC/bin/nord-confgen.exe .
+
+# Android ARM64
+CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -ldflags "-s -w" \
+  -o ../../Mobile/Android/app/src/main/jniLibs/arm64-v8a/libnordconfgen.so .
 ```
 
 ---

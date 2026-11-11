@@ -92,7 +92,7 @@
             android:layout_marginTop="6dp"
             android:fontFamily="monospace"
             android:lineSpacingExtra="3dp"
-            android:text="• Desconexão imediata de qualquer túnel ativo\n• Exclusão permanente do arquivo ardc_vpn.conf\n• Exclusão da sessão de login salva (.protonvpn-session.json)\n• Redefinição dos campos de usuário e senha"
+            android:text="• Desconexão imediata de qualquer túnel ativo\n• Exclusão permanente do arquivo ardc_vpn.conf\n• Exclusão das sessões salvas (.protonvpn-session.json e .nordvpn-session.json)\n• Redefinição dos campos de usuário, senha e token"
             android:textColor="@color/terminal_text_secondary"
             android:textSize="10sp" />
     </LinearLayout>

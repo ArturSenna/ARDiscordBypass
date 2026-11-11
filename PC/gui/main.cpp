@@ -28,6 +28,7 @@ static bool shouldRunInCliMode(int argc, char *argv[]) {
         arg == "-cfg" || arg == "--cfg" || arg == "-c" || arg == "--config" ||
         arg.rfind("-cfg=", 0) == 0 || arg.rfind("--cfg=", 0) == 0 ||
         arg == "-l" || arg == "-login" || arg == "--login" || arg == "--proton" ||
+        arg == "-nord" || arg == "--nord" || arg == "--nordvpn" ||
         arg == "-h" || arg == "--help" || arg == "-help" ||
         arg == "--cli" || arg == "-cli") {
       return true;

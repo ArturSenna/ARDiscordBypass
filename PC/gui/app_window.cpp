@@ -49,7 +49,10 @@ AppWindow::AppWindow() {
   m_status = Core::Service::instance().queryStatus();
   m_lastProbe = std::chrono::steady_clock::now();
 
-  if (fs::is_regular_file("ardc_vpn.conf")) {
+  m_activeProvider = Core::Service::instance().activeProvider();
+  if (m_activeProvider == VpnProvider::Nord) {
+    m_configMode = 2;
+  } else if (fs::is_regular_file("ardc_vpn.conf")) {
     m_configMode = 0;
   }
 }
@@ -95,6 +98,7 @@ void AppWindow::render() {
   if (!m_isWorking && std::chrono::duration_cast<std::chrono::seconds>(now - m_lastProbe).count() >= 2) {
     std::string conf = (m_configMode == 1 && m_customPathBuf[0] != '\0') ? m_customPathBuf : "ardc_vpn.conf";
     m_status = Core::Service::instance().queryStatus(conf);
+    m_activeProvider = Core::Service::instance().activeProvider();
     m_lastProbe = now;
   }
 
@@ -354,7 +358,7 @@ void AppWindow::renderDashboard() {
     ImGui::BeginChild("ConfigAlertBox", ImVec2(0, 46), true);
     ImGui::TextColored(th.terminalYellow, "[!] Nenhuma configuracao salva.");
     ImGui::SameLine(180.0f);
-    ImGui::TextColored(th.textMuted, "Proton Gratis (Recomendado) ou Perfil .conf");
+    ImGui::TextColored(th.textMuted, "Proton Gratis, NordVPN ou Perfil .conf");
     ImGui::SameLine(ImGui::GetWindowWidth() - 170.0f);
     if (ImGui::Button(" Escolher Perfil... ", ImVec2(150, 26))) {
       m_showSetupModal = true;
@@ -486,6 +490,46 @@ void AppWindow::renderConfigTab() {
   ImGui::Separator();
   ImGui::Spacing();
 
+  ImGui::RadioButton("NordVPN (Assinatura Ativa / Token de Acesso)", &m_configMode, 2);
+  if (m_configMode == 2) {
+    ImGui::Indent(24.0f);
+    if (Core::Service::instance().hasNordSession()) {
+      ImGui::TextColored(th.terminalGreen, "[OK] Chave NordLynx salva (~/.nordvpn-session.json)");
+      ImGui::TextColored(th.textMuted, "O aplicativo renova o tunel automaticamente sem pedir o token de novo.");
+    } else {
+      ImGui::TextColored(th.terminalYellow, "[!] Nenhuma sessao salva. Informe um token de acesso da sua conta NordVPN:");
+    }
+
+    ImGui::Spacing();
+    ImGui::TextColored(th.textSecondary, "Token de Acesso NordVPN:");
+    ImGuiInputTextFlags tokenFlags = m_hideNordToken ? ImGuiInputTextFlags_Password : 0;
+    ImGui::InputText("##nordToken", m_nordTokenBuf, sizeof(m_nordTokenBuf), tokenFlags);
+    ImGui::SameLine();
+    if (ImGui::Button(m_hideNordToken ? "Mostrar##nordToken" : "Ocultar##nordToken")) {
+      m_hideNordToken = !m_hideNordToken;
+    }
+    ImGui::TextColored(th.textMuted, "O token so e usado para obter a chave NordLynx e nao e gravado em disco.");
+
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Button, th.alriRed);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, th.alriRedGlow);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, th.alriRedDark);
+    if (ImGui::Button("  Validar Token & Gerar Perfil  ", ImVec2(240, 36)) && !m_isWorking) {
+      triggerNordLogin(false);
+    }
+    ImGui::PopStyleColor(3);
+
+    ImGui::SameLine();
+    if (ImGui::Button("Gerar Token no Nord Account (Web)", ImVec2(270, 36))) {
+      openBrowser(NORD_TOKEN_URL);
+    }
+    ImGui::Unindent(24.0f);
+  }
+
+  ImGui::Spacing();
+  ImGui::Separator();
+  ImGui::Spacing();
+
   ImGui::RadioButton("Perfil WireGuard Customizado (.conf pessoal / VPS)", &m_configMode, 1);
   if (m_configMode == 1) {
     ImGui::Indent(24.0f);
@@ -512,15 +556,21 @@ void AppWindow::renderConfigTab() {
 
   bool hasConf = fs::is_regular_file("ardc_vpn.conf");
   bool hasSess = Core::Service::instance().hasSavedSession();
+  bool hasNordSess = Core::Service::instance().hasNordSession();
 
   ImGui::TextColored(th.textSecondary, "Perfil WireGuard Local (ardc_vpn.conf):");
   ImGui::SameLine(340.0f);
-  if (hasConf) ImGui::TextColored(th.terminalGreen, "Presente no disco");
+  if (hasConf) ImGui::TextColored(th.terminalGreen, "Presente no disco (%s)", providerDisplayName(m_activeProvider));
   else ImGui::TextColored(th.textMuted, "Ausente");
 
   ImGui::TextColored(th.textSecondary, "Sessao de Login Proton (.protonvpn-session.json):");
   ImGui::SameLine(340.0f);
   if (hasSess) ImGui::TextColored(th.terminalGreen, "Sessao ativa salva");
+  else ImGui::TextColored(th.textMuted, "Nenhuma sessao");
+
+  ImGui::TextColored(th.textSecondary, "Sessao NordVPN (.nordvpn-session.json):");
+  ImGui::SameLine(340.0f);
+  if (hasNordSess) ImGui::TextColored(th.terminalGreen, "Chave NordLynx salva");
   else ImGui::TextColored(th.textMuted, "Nenhuma sessao");
 
   ImGui::Spacing();
@@ -811,7 +861,7 @@ void AppWindow::renderLoadingOverlay() {
         titleStr = "[ ✕ ] FALHA NA AUTENTICACAO";
         titleCol = th.alriRed;
       } else {
-        titleStr = "AUTENTICANDO PROTONVPN";
+        titleStr = std::string("AUTENTICANDO ") + m_authProviderName;
         titleCol = th.alriRed;
       }
 
@@ -979,7 +1029,8 @@ bool AppWindow::hasValidConfig() const {
   if (m_configMode == 1) {
     return (m_customPathBuf[0] != '\0' && fs::is_regular_file(m_customPathBuf));
   }
-  return (fs::is_regular_file("ardc_vpn.conf") || Core::Service::instance().hasSavedSession());
+  return (fs::is_regular_file("ardc_vpn.conf") || Core::Service::instance().hasSavedSession() ||
+          Core::Service::instance().hasNordSession());
 }
 
 void AppWindow::openBrowser(const std::string &url) {
@@ -1089,7 +1140,54 @@ void AppWindow::renderSetupModal() {
     ImGui::Spacing();
 
     // ==========================================
-    // OPÇÃO 2: PERFIL CUSTOMIZADO (.CONF)
+    // OPÇÃO 2: NORDVPN (ASSINATURA ATIVA)
+    // ==========================================
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, th.surface);
+    ImGui::BeginChild("NordChoiceCard", ImVec2(0, 206.0f), true, ImGuiWindowFlags_None);
+
+    ImGui::TextColored(th.textPrimary, "CONTA NORDVPN (ASSINATURA ATIVA)");
+    ImGui::TextColored(th.textMuted, "Cole um token de acesso gerado no Nord Account. Ele nao e gravado em disco.");
+    ImGui::Spacing();
+
+    ImGui::TextColored(th.textSecondary, "Token de Acesso NordVPN:");
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 75.0f - ImGui::GetStyle().ItemSpacing.x);
+    ImGuiInputTextFlags tFlags = m_hideNordToken ? ImGuiInputTextFlags_Password : 0;
+    ImGui::InputText("##modalNordToken", m_nordTokenBuf, sizeof(m_nordTokenBuf), tFlags);
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    if (ImGui::Button(m_hideNordToken ? "Mostrar##modalNordToken" : "Ocultar##modalNordToken", ImVec2(75.0f, 0.0f))) {
+      m_hideNordToken = !m_hideNordToken;
+    }
+
+    ImGui::Spacing();
+
+    float nordBtnW = (ImGui::GetContentRegionAvail().x - 10.0f) * 0.5f;
+
+    ImGui::PushStyleColor(ImGuiCol_Button, th.alriRed);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, th.alriRedGlow);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, th.alriRedDark);
+    ImGui::PushStyleColor(ImGuiCol_Text, th.btnText);
+
+    if (ImGui::Button("2. VALIDAR TOKEN & ATIVAR BYPASS", ImVec2(nordBtnW, 36.0f)) && !m_isWorking) {
+      m_showSetupModal = false;
+      ImGui::CloseCurrentPopup();
+      triggerNordLogin(true);
+    }
+    ImGui::PopStyleColor(4);
+
+    ImGui::SameLine(0.0f, 10.0f);
+    if (ImGui::Button("Gerar Token no Nord Account (Web)", ImVec2(nordBtnW, 36.0f))) {
+      openBrowser(NORD_TOKEN_URL);
+      Core::Service::instance().addLog("Abrindo pagina de tokens de acesso do Nord Account no navegador...", 0);
+    }
+
+    ImGui::EndChild();
+    ImGui::PopStyleColor(); // ChildBg
+
+    ImGui::Spacing();
+
+    // ==========================================
+    // OPÇÃO 3: PERFIL CUSTOMIZADO (.CONF)
     // ==========================================
     ImGui::PushStyleColor(ImGuiCol_ChildBg, th.surface);
     ImGui::BeginChild("CustomChoiceCard", ImVec2(0, 135.0f), true, ImGuiWindowFlags_None);
@@ -1108,7 +1206,7 @@ void AppWindow::renderSetupModal() {
     }
 
     ImGui::Spacing();
-    if (ImGui::Button("2. USAR ARQUIVO .CONF & ATIVAR BYPASS", ImVec2(-1, 32.0f)) && !m_isWorking) {
+    if (ImGui::Button("3. USAR ARQUIVO .CONF & ATIVAR BYPASS", ImVec2(-1, 32.0f)) && !m_isWorking) {
       if (m_customPathBuf[0] == '\0' || !fs::is_regular_file(m_customPathBuf)) {
         Core::Service::instance().addLog("[AVISO] Selecione um arquivo .conf valido antes de prosseguir.", 2);
       } else {
@@ -1142,7 +1240,7 @@ void AppWindow::triggerStart() {
   if (m_isWorking) return;
 
   if (!hasValidConfig()) {
-    Core::Service::instance().addLog("[AVISO] Nenhuma configuracao salva. Escolha Proton Gratis (Recomendado) ou Importe .conf.", 2);
+    Core::Service::instance().addLog("[AVISO] Nenhuma configuracao salva. Escolha Proton Gratis (Recomendado), NordVPN ou Importe .conf.", 2);
     m_showSetupModal = true;
     return;
   }
@@ -1206,6 +1304,7 @@ void AppWindow::triggerProtonLogin() {
   m_isAuthWorking = true;
   m_authSuccess = false;
   m_authError.clear();
+  m_authProviderName = "PROTONVPN";
   m_authStartTime = static_cast<float>(ImGui::GetTime());
   m_workMessage = "Iniciando handshake seguro via SRP na API Proton...";
 
@@ -1253,6 +1352,7 @@ void AppWindow::triggerProtonLoginAndStart() {
   m_isAuthWorking = true;
   m_authSuccess = false;
   m_authError.clear();
+  m_authProviderName = "PROTONVPN";
   m_authStartTime = static_cast<float>(ImGui::GetTime());
   m_workMessage = "Iniciando handshake seguro via SRP na API Proton...";
 
@@ -1305,6 +1405,83 @@ void AppWindow::triggerProtonLoginAndStart() {
   });
 }
 
+void AppWindow::triggerNordLogin(bool startAfter) {
+  if (m_isWorking) return;
+  std::string token = trimWhitespace(m_nordTokenBuf);
+  if (token.empty()) {
+    Core::Service::instance().addLog("[AVISO] Informe o token de acesso NordVPN para gerar o perfil.", 2);
+    if (startAfter) m_showSetupModal = true;
+    return;
+  }
+
+  m_isWorking = true;
+  m_isAuthWorking = true;
+  m_authSuccess = false;
+  m_authError.clear();
+  m_authProviderName = "NORDVPN";
+  m_authStartTime = static_cast<float>(ImGui::GetTime());
+  m_workMessage = "Validando token de acesso na API NordVPN...";
+
+  m_future = std::async(std::launch::async, [this, token, startAfter]() {
+    std::string err;
+    bool ok = Core::Service::instance().loginNord(token, err, [this](const std::string &stage) {
+      m_workMessage = stage;
+      Core::Service::instance().addLog("[ ⠋ ] " + stage, 0);
+    });
+    if (!ok) {
+      m_authError = !err.empty() ? err : "Falha ao gerar o perfil NordVPN.";
+      m_status = Core::Service::instance().queryStatus("ardc_vpn.conf");
+      return;
+    }
+
+    // A chave NordLynx já está salva: o token não precisa continuar na interface.
+    std::memset(m_nordTokenBuf, 0, sizeof(m_nordTokenBuf));
+    m_configMode = 2;
+    m_activeProvider = VpnProvider::Nord;
+    m_authSuccess = true;
+
+    if (!startAfter) {
+      m_workMessage = "Perfil WireGuard NordVPN gerado com sucesso!";
+      Core::Service::instance().addLog("[ ✔ ] Perfil NordVPN configurado com sucesso!", 1);
+      std::this_thread::sleep_for(std::chrono::milliseconds(800));
+
+      m_status = Core::Service::instance().queryStatus("ardc_vpn.conf");
+      m_authSuccess = false;
+      m_isAuthWorking = false;
+      m_isWorking = false;
+      return;
+    }
+
+    m_workMessage = "Túnel WireGuard configurado. Inicializando bypass...";
+    Core::Service::instance().addLog("[ ✔ ] Token validado com sucesso! Inicializando bypass...", 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+
+    // Mesma transição do login Proton: do overlay de autenticação para a conexão
+    m_authSuccess = false;
+    m_isAuthWorking = false;
+    m_isConnecting = true;
+    m_isStopping = false;
+    m_workMessage = "Ativando túnel WireGuard isolado...";
+
+    Core::Service::instance().addLog("[ ⠋ ] Preparando túnel WireGuard dedicado e isolamento de rede...", 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    Core::Service::instance().addLog("[ ⠙ ] Estabelecendo handshake com servidor internacional...", 0);
+
+    bool startOk = Core::Service::instance().startBypass("ardc_vpn.conf", err, [this](const std::string &msg) {
+      m_workMessage = msg;
+    });
+    if (!startOk && !err.empty()) {
+      Core::Service::instance().addLog(err, 3);
+    } else if (startOk) {
+      Core::Service::instance().addLog("[ ✔ ] Túnel conectado! Discord liberado para Transmissão e Câmera.", 1);
+    }
+
+    m_status = Core::Service::instance().queryStatus("ardc_vpn.conf");
+    m_isConnecting = false;
+    m_isWorking = false;
+  });
+}
+
 void AppWindow::triggerClearAll() {
   if (m_isWorking) return;
   m_isWorking = true;
@@ -1316,6 +1493,7 @@ void AppWindow::triggerClearAll() {
     m_customPathBuf[0] = '\0';
     m_protonUserBuf[0] = '\0';
     m_protonPassBuf[0] = '\0';
+    std::memset(m_nordTokenBuf, 0, sizeof(m_nordTokenBuf));
     m_status = Core::Service::instance().queryStatus();
     m_isWorking = false;
   });

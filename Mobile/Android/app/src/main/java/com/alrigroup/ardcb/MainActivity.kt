@@ -15,6 +15,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.alrigroup.ardcb.service.DiscordVpnService
+import com.alrigroup.ardcb.tunnel.NordAuthManager
 import com.alrigroup.ardcb.tunnel.ProtonAuthManager
 import com.alrigroup.ardcb.tunnel.WireGuardConfigManager
 import com.alrigroup.ardcb.updater.UpdateChecker
@@ -74,6 +75,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var etConfigProtonPass: TextInputEditText
     private lateinit var btnConfigProtonLogin: MaterialButton
     private lateinit var btnProtonWeb: MaterialButton
+    private lateinit var etConfigNordToken: TextInputEditText
+    private lateinit var btnConfigNordLogin: MaterialButton
+    private lateinit var btnNordWeb: MaterialButton
     private lateinit var btnImportConfig: MaterialButton
     private lateinit var btnImportCustom: MaterialButton
     private lateinit var tvDataSummary: TextView
@@ -218,6 +222,9 @@ class MainActivity : AppCompatActivity() {
         etConfigProtonPass = findViewById(R.id.etConfigProtonPass)
         btnConfigProtonLogin = findViewById(R.id.btnConfigProtonLogin)
         btnProtonWeb = findViewById(R.id.btnProtonWeb)
+        etConfigNordToken = findViewById(R.id.etConfigNordToken)
+        btnConfigNordLogin = findViewById(R.id.btnConfigNordLogin)
+        btnNordWeb = findViewById(R.id.btnNordWeb)
         btnImportConfig = findViewById(R.id.btnImportConfig)
         btnImportCustom = findViewById(R.id.btnImportCustom)
         tvDataSummary = findViewById(R.id.tvDataSummary)
@@ -304,6 +311,16 @@ class MainActivity : AppCompatActivity() {
             triggerProtonAuthentication(user, pass, startVpnOnSuccess = false, origin = "config")
         }
 
+        btnNordWeb.setOnClickListener {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(NordAuthManager.TOKEN_URL)))
+            appendTerminal("\n[ ℹ ] Abrindo página de tokens de acesso do Nord Account...")
+        }
+
+        btnConfigNordLogin.setOnClickListener {
+            val token = etConfigNordToken.text?.toString() ?: ""
+            triggerNordAuthentication(token, startVpnOnSuccess = false, origin = "config")
+        }
+
         btnImportConfig.setOnClickListener {
             importConfigLauncher.launch("*/*")
         }
@@ -340,7 +357,11 @@ class MainActivity : AppCompatActivity() {
         val hasConf = WireGuardConfigManager.hasConfig(this)
         val hasSession = ProtonAuthManager.hasSavedSession(this)
         if (hasConf) {
-            val note = if (hasSession) " (ProtonVPN Ativa)" else ""
+            val note = when {
+                WireGuardConfigManager.isNordProfile(this) -> " (NordVPN Ativa)"
+                hasSession -> " (ProtonVPN Ativa)"
+                else -> ""
+            }
             tvConfigStatus.text = "Presente no disco (ardc_vpn.conf)$note"
             tvConfigStatus.setTextColor(ContextCompat.getColor(this, R.color.terminal_green))
             tvDataSummary.text = "Armazenamento local: ardc_vpn.conf$note"
@@ -370,8 +391,10 @@ class MainActivity : AppCompatActivity() {
             }
             val deleted = WireGuardConfigManager.deleteConfig(this)
             ProtonAuthManager.clearSession(this)
+            NordAuthManager.clearSession(this)
             etConfigProtonUser.setText("")
             etConfigProtonPass.setText("")
+            etConfigNordToken.setText("")
             if (deleted) {
                 appendTerminal("[ ✔ ] Todas as configurações e arquivos locais foram apagados.")
                 Toast.makeText(this, "Configurações apagadas com sucesso!", Toast.LENGTH_SHORT).show()
@@ -521,7 +544,7 @@ class MainActivity : AppCompatActivity() {
     private fun prepareAndStartVpn() {
         if (!WireGuardConfigManager.hasConfig(this)) {
             appendTerminal("\n[ ! ] Nenhuma configuração WireGuard encontrada.")
-            appendTerminal("[ ! ] Escolha entre ProtonVPN Gratuita (Recomendado) ou Importar .conf.")
+            appendTerminal("[ ! ] Escolha entre ProtonVPN Gratuita (Recomendado), NordVPN ou Importar .conf.")
             showChoiceModal()
             return
         }
@@ -534,14 +557,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showAuthLoading(initialStatus: String = "Iniciando conexão segura com a Proton...") {
+    private fun showAuthLoading(
+        initialStatus: String = "Iniciando conexão segura com a Proton...",
+        providerName: String = "PROTONVPN"
+    ) {
         authLoadingOverlay.alpha = 0f
         authLoadingOverlay.visibility = View.VISIBLE
         authLoadingOverlay.animate().alpha(1f).setDuration(250).start()
 
         pbAuthLoading.visibility = View.VISIBLE
         btnAuthLoadingDismiss.visibility = View.GONE
-        tvAuthLoadingTitle.text = "AUTENTICANDO PROTONVPN"
+        tvAuthLoadingTitle.text = "AUTENTICANDO $providerName"
         tvAuthLoadingTitle.setTextColor(ContextCompat.getColor(this, R.color.alri_red))
         tvAuthLoadingStatus.text = initialStatus
 
@@ -678,6 +704,56 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun triggerNordAuthentication(
+        token: String,
+        startVpnOnSuccess: Boolean,
+        origin: String = "modal"
+    ) {
+        if (token.isBlank()) {
+            Toast.makeText(this, "Informe o token de acesso NordVPN.", Toast.LENGTH_SHORT).show()
+            appendTerminal("[AVISO] O token de acesso é obrigatório para configurar a NordVPN.")
+            return
+        }
+
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+        currentFocus?.let { view ->
+            imm?.hideSoftInputFromWindow(view.windowToken, 0)
+        }
+
+        showAuthLoading("Validando token de acesso na API NordVPN...", providerName = "NORDVPN")
+        appendTerminal("\n[ ℹ ] Conectando à API NordVPN...")
+
+        lifecycleScope.launch {
+            val result = NordAuthManager.authenticateAndGenerate(this@MainActivity, token) { step ->
+                runOnUiThread {
+                    updateAuthLoadingStatus(step)
+                    appendTerminal("[ ℹ ] $step")
+                }
+            }
+
+            if (result.isSuccess) {
+                appendTerminal("[ ✔ ] Perfil WireGuard ardc_vpn.conf gerado e validado!")
+                // A chave NordLynx já está salva: o token não precisa continuar na tela.
+                etConfigNordToken.setText("")
+                refreshConfigState()
+                showAuthLoadingSuccess {
+                    Toast.makeText(this@MainActivity, "Conexão NordVPN configurada com sucesso!", Toast.LENGTH_SHORT).show()
+                    if (startVpnOnSuccess) {
+                        prepareAndStartVpn()
+                    }
+                }
+            } else {
+                val err = result.exceptionOrNull()?.message ?: "Falha desconhecida"
+                appendTerminal("[ ✖ ] Erro ao configurar a NordVPN: $err", isError = true)
+                showAuthLoadingError(err) {
+                    if (origin == "modal") {
+                        showChoiceModal()
+                    }
+                }
+            }
+        }
+    }
+
     private fun showChoiceModal(prefillUser: String = "") {
         val bottomSheet = com.google.android.material.bottomsheet.BottomSheetDialog(this)
         val sheetView = layoutInflater.inflate(R.layout.layout_choice_bottom_sheet, null)
@@ -688,6 +764,9 @@ class MainActivity : AppCompatActivity() {
         val etPass: TextInputEditText = sheetView.findViewById(R.id.etChoiceProtonPass)
         val btnLogin: MaterialButton = sheetView.findViewById(R.id.btnChoiceProtonLogin)
         val btnProtonWeb: MaterialButton = sheetView.findViewById(R.id.btnChoiceProtonWeb)
+        val etNordToken: TextInputEditText = sheetView.findViewById(R.id.etChoiceNordToken)
+        val btnNordLogin: MaterialButton = sheetView.findViewById(R.id.btnChoiceNordLogin)
+        val btnNordWeb: MaterialButton = sheetView.findViewById(R.id.btnChoiceNordWeb)
         val btnImportCustom: MaterialButton = sheetView.findViewById(R.id.btnChoiceImportCustom)
 
         if (prefillUser.isNotBlank()) {
@@ -713,6 +792,22 @@ class MainActivity : AppCompatActivity() {
             val url = "https://account.protonvpn.com/pt-br/login"
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
             appendTerminal("\n[ ℹ ] Abrindo página oficial de login ProtonVPN...")
+        }
+
+        btnNordLogin.setOnClickListener {
+            val token = etNordToken.text?.toString() ?: ""
+            if (token.isBlank()) {
+                Toast.makeText(this, "Informe o token de acesso NordVPN.", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            bottomSheet.dismiss()
+            triggerNordAuthentication(token, startVpnOnSuccess = true, origin = "modal")
+        }
+
+        btnNordWeb.setOnClickListener {
+            bottomSheet.dismiss()
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(NordAuthManager.TOKEN_URL)))
+            appendTerminal("\n[ ℹ ] Abrindo página de tokens de acesso do Nord Account...")
         }
 
         btnImportCustom.setOnClickListener {

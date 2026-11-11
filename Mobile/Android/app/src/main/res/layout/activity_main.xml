@@ -556,13 +556,79 @@
                             app:cornerRadius="8dp"
                             app:strokeColor="@color/terminal_card_border" />
 
+                        <!-- Opção NordVPN: assinatura ativa + token de acesso -->
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="14dp"
+                            android:fontFamily="monospace"
+                            android:text="OPÇÃO 2: CONTA NORDVPN (ASSINATURA ATIVA)"
+                            android:textColor="@color/terminal_text_secondary"
+                            android:textSize="11sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:fontFamily="monospace"
+                            android:text="Cole um token de acesso gerado no Nord Account. O token não é salvo: o app guarda apenas a chave NordLynx."
+                            android:textColor="@color/terminal_text_muted"
+                            android:textSize="10sp" />
+
+                        <com.google.android.material.textfield.TextInputLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            app:boxBackgroundColor="@color/terminal_surface"
+                            app:boxStrokeColor="@color/alri_red"
+                            app:passwordToggleEnabled="true"
+                            app:passwordToggleTint="@color/terminal_text_muted"
+                            app:hintTextColor="@color/terminal_text_secondary"
+                            android:textColorHint="@color/terminal_text_muted">
+
+                            <com.google.android.material.textfield.TextInputEditText
+                                android:id="@+id/etConfigNordToken"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:fontFamily="monospace"
+                                android:hint="Token de acesso NordVPN"
+                                android:textColor="@color/terminal_text_primary"
+                                android:textSize="12sp"
+                                android:inputType="textPassword" />
+                        </com.google.android.material.textfield.TextInputLayout>
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnConfigNordLogin"
+                            android:layout_width="match_parent"
+                            android:layout_height="44dp"
+                            android:layout_marginTop="8dp"
+                            android:fontFamily="monospace"
+                            android:text="VALIDAR TOKEN &amp; GERAR PERFIL"
+                            android:textColor="@color/terminal_btn_text"
+                            android:textSize="11sp"
+                            android:textStyle="bold"
+                            app:backgroundTint="@color/alri_red"
+                            app:cornerRadius="8dp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnNordWeb"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="36dp"
+                            android:layout_marginTop="2dp"
+                            android:fontFamily="monospace"
+                            android:text="Gerar token de acesso no Nord Account (Web)"
+                            android:textColor="@color/terminal_text_muted"
+                            android:textSize="10sp" />
+
                         <!-- Opção Secundária: Perfil Customizado -->
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="14dp"
                             android:fontFamily="monospace"
-                            android:text="OPÇÃO 2: PERFIL CUSTOMIZADO (.CONF)"
+                            android:text="OPÇÃO 3: PERFIL CUSTOMIZADO (.CONF)"
                             android:textColor="@color/terminal_text_secondary"
                             android:textSize="11sp"
                             android:textStyle="bold" />
@@ -1006,7 +1072,7 @@
         </LinearLayout>
     </FrameLayout>
 
-    <!-- PROTON AUTH LOADING OVERLAY (CYBERPUNK ALRI RED ANIMATION) -->
+    <!-- AUTH LOADING OVERLAY: PROTONVPN / NORDVPN (CYBERPUNK ALRI RED ANIMATION) -->
     <FrameLayout
         android:id="@+id/authLoadingOverlay"
         android:layout_width="match_parent"

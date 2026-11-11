@@ -13,6 +13,13 @@ if (WIN32)
 		DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/bin/proton-confgen.exe
 		COMMENT "Embutindo binario Windows do proton-confgen.exe"
 	)
+	add_custom_command(
+		OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/nord_confgen_embed.o
+		COMMAND ${CMAKE_OBJCOPY} -I binary -O pe-x86-64 -B i386:x86-64 nord-confgen.exe ${CMAKE_CURRENT_BINARY_DIR}/nord_confgen_embed.o
+		WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin
+		DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/bin/nord-confgen.exe
+		COMMENT "Embutindo binario Windows do nord-confgen.exe"
+	)
 else()
 	add_custom_command(
 		OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/proton_confgen_embed.o
@@ -21,9 +28,22 @@ else()
 		DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/bin/proton-confgen
 		COMMENT "Embutindo binario Linux do proton-confgen"
 	)
+	add_custom_command(
+		OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/nord_confgen_embed.o
+		COMMAND objcopy -I binary -O elf64-x86-64 -B i386:x86-64 --rename-section .data=.rodata,alloc,load,readonly,data,contents nord-confgen ${CMAKE_CURRENT_BINARY_DIR}/nord_confgen_embed.o
+		WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin
+		DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/bin/nord-confgen
+		COMMENT "Embutindo binario Linux do nord-confgen"
+	)
 endif()
 
-add_executable(ARDiscordBypass main.cpp ${CMAKE_CURRENT_BINARY_DIR}/proton_confgen_embed.o)
+# Geradores de perfil (ProtonVPN e NordVPN) embutidos em todos os executaveis
+set(CONFGEN_EMBED_OBJECTS
+	${CMAKE_CURRENT_BINARY_DIR}/proton_confgen_embed.o
+	${CMAKE_CURRENT_BINARY_DIR}/nord_confgen_embed.o
+)
+
+add_executable(ARDiscordBypass main.cpp ${CONFGEN_EMBED_OBJECTS})
 target_include_directories(ARDiscordBypass PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 if (WIN32)
@@ -49,7 +69,7 @@ if (BUILD_GUI)
 
 	if (WIN32)
 		list(APPEND GUI_SOURCES gui/vendor/imgui/backends/imgui_impl_win32.cpp)
-		add_executable(ARDiscordBypass_gui WIN32 ${GUI_SOURCES} ${CMAKE_CURRENT_BINARY_DIR}/proton_confgen_embed.o)
+		add_executable(ARDiscordBypass_gui WIN32 ${GUI_SOURCES} ${CONFGEN_EMBED_OBJECTS})
 		target_include_directories(ARDiscordBypass_gui PRIVATE 
 			${CMAKE_CURRENT_SOURCE_DIR}
 			${CMAKE_CURRENT_SOURCE_DIR}/gui
@@ -60,7 +80,7 @@ if (BUILD_GUI)
 		)
 	else()
 		list(APPEND GUI_SOURCES gui/vendor/imgui/backends/imgui_impl_glfw.cpp)
-		add_executable(ARDiscordBypass_gui ${GUI_SOURCES} ${CMAKE_CURRENT_BINARY_DIR}/proton_confgen_embed.o)
+		add_executable(ARDiscordBypass_gui ${GUI_SOURCES} ${CONFGEN_EMBED_OBJECTS})
 		target_include_directories(ARDiscordBypass_gui PRIVATE 
 			${CMAKE_CURRENT_SOURCE_DIR}
 			${CMAKE_CURRENT_SOURCE_DIR}/gui
