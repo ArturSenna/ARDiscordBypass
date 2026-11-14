@@ -3,6 +3,12 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# No macOS o build e outro (clang++ direto, somente CLI).
+if [ "$(uname -s)" = "Darwin" ]; then
+    exec "$SCRIPT_DIR/build_macos.sh" "$@"
+fi
+
 BUILD_DIR="$SCRIPT_DIR/build"
 BUILD_TYPE="Release"
 BUILD_GUI="OFF"

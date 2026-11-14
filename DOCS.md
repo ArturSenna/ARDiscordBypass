@@ -18,6 +18,7 @@
    - [3.6 Arquitetura de Binário Único Autocontido (`Embedded Binary Auto-Extraction`)](#36-arquitetura-de-binário-único-autocontido-embedded-binary-auto-extraction)
    - [3.7 Handshake SRP, Normalização de Credenciais & Mapeamento de Erros](#37-handshake-srp-normalização-de-credenciais--mapeamento-de-erros)
    - [3.8 Provedor NordVPN (`nord-confgen`)](#38-provedor-nordvpn-nord-confgen)
+   - [3.9 macOS — `utun`, `pf` por Grupo & Discord Web (prévia, CLI)](#39-macos--utun-pf-por-grupo--discord-web-prévia-cli)
 4. [Módulo Mobile](#4-módulo-mobile)
    - [4.1 Android — VpnService com GoBackend WireGuard](#41-android--vpnservice-com-gobackend-wireguard)
    - [4.2 Split-Tunneling por Identificador de Pacote](#42-split-tunneling-por-identificador-de-pacote)
@@ -32,6 +33,7 @@
    - [6.3 Build do APK Android](#63-build-do-apk-android)
    - [6.4 Compilação do Motor Go para Android (`libprotonconfgen.so`)](#64-compilação-do-motor-go-para-android-libprotonconfgenso)
    - [6.5 Compilação do Gerador NordVPN (`nord-confgen`)](#65-compilação-do-gerador-nordvpn-nord-confgen)
+   - [6.6 Build macOS (CLI) e Utilitários Go](#66-build-macos-cli-e-utilitários-go)
 7. [Segurança, Antiban e Relatórios VirusTotal](#7-segurança-antiban-e-relatórios-virustotal)
 8. [Licença & Termos de Uso](#8-licença--termos-de-uso)
 
@@ -86,6 +88,7 @@ ARDiscordBypass/
 ├── PC/                         # Solução Desktop em C++20 Nativo
 │   ├── CMakeLists.txt          # Configuração CMake do módulo PC (com regras objcopy de embedding)
 │   ├── build.sh                # Script de compilação automatizada Linux
+│   ├── build_macos.sh          # Script de compilação macOS (CLI; chamado pelo build.sh)
 │   ├── build.bat               # Script de compilação automatizada Windows
 │   ├── main.cpp                # Ponto de entrada, verificador e renderizador CLI
 │   ├── ui.h                    # Paleta TrueColor ANSI, Braille spinners e responsividade
@@ -96,6 +99,7 @@ ARDiscordBypass/
 │   │   ├── proton-confgen.exe  # Binário PE x64 para linkagem estática no Windows
 │   │   ├── nord-confgen        # Gerador NordVPN (ELF x86_64) embutido no Linux
 │   │   ├── nord-confgen.exe    # Gerador NordVPN (PE x64) embutido no Windows
+│   │   ├── macos-arm64/        # Utilitários do macOS (ardc-tunnel, nord-confgen, proton-confgen), não embutidos
 │   │   ├── wiresock-client.exe # Cliente de injeção WFP WireGuard para Windows
 │   │   └── ws_driver.sys       # Driver de kernel de filtragem WFP
 │   ├── gui/                    # Interface gráfica OpenGL Dear ImGui (Dark/Light)
@@ -105,6 +109,7 @@ ARDiscordBypass/
 │   │   └── style.h             # Paleta de cores ALRI Red e temas
 │   └── os/
 │       ├── linux/platform.h    # Namespaces (`netns`), auto-extração (~/.local/share) e WireGuard
+│       ├── macos/platform.h    # utun + pf por grupo, lançador com troca de grupo e navegador dedicado
 │       └── windows/platform.h  # CreateProcessW nativo, auto-extração (%LOCALAPPDATA%) e WFP WireSock
 │
 ├── tools/                      # Ferramentas Auxiliares de Código Aberto
@@ -115,10 +120,16 @@ ARDiscordBypass/
 │   │   ├── internal/api/       # Transporte HTTP/TLS com emulação uTLS
 │   │   ├── internal/vpn/       # Descoberta de servidores internacionais gratuitos
 │   │   └── internal/wireguard/ # Geração de chaves Curve25519 e perfil ardc_vpn.conf
-│   └── nord-confgen/           # Código-Fonte do Gerador NordVPN (Go 1.22+, só biblioteca padrão)
-│       ├── main.go             # Token -> chave NordLynx, escolha de servidor e perfil
-│       ├── resolver.go         # Fallback de DNS para ambientes sem /etc/resolv.conf (Android)
-│       └── main_test.go        # Testes com API NordVPN simulada
+│   ├── nord-confgen/           # Código-Fonte do Gerador NordVPN (Go 1.22+, só biblioteca padrão)
+│   │   ├── main.go             # Token -> chave NordLynx, escolha de servidor e perfil
+│   │   ├── resolver.go         # Fallback de DNS para ambientes sem /etc/resolv.conf (Android)
+│   │   └── main_test.go        # Testes com API NordVPN simulada
+│   └── macos-tunnel/           # Túnel do macOS, binário ardc-tunnel (Go 1.23+, wireguard-go)
+│       ├── main.go, daemon.go  # Comandos up/down/status/pids/kill/diag e ciclo de vida do daemon
+│       ├── nat.go              # Reescrita do endereço de origem por fluxo e clamp de MSS
+│       ├── pf.go               # Regras do pf (desvio por grupo e kill switch)
+│       ├── conf.go             # Leitura do perfil .conf e conversão para a UAPI do WireGuard
+│       └── sys_darwin.go       # ifconfig, pfctl, sysctl e lista de processos do macOS
 │
 └── Mobile/                     # Soluções Mobile Nativas
     └── Android/                # App Android (Kotlin, Jetpack, WireGuard GoBackend)
@@ -211,6 +222,7 @@ O ponto de entrada `PC/main.cpp` processa argumentos de linha de comando:
 - `-cfg <path>`, `--config <path>`: Permite apontar para qualquer arquivo de configuração WireGuard arbitrário, ignorando a renovação automática da ProtonVPN e injetando as diretivas necessárias de interface e MTU.
 - `-l`, `--login`, `--proton`: Força reautenticação interativa via SRP com o utilitário `proton-confgen`.
 - `--nord`, `--nordvpn`: Gera o perfil pela NordVPN, pedindo um token de acesso (entrada oculta) e acionando o `nord-confgen`.
+- `--diag` (macOS): Imprime o estado do túnel, as regras do `pf`, a interface e o IP de saída pela rede normal e pelo grupo do túnel.
 
 Sem perfil `ardc_vpn.conf` e sem argumentos, o provedor é o da sessão salva mais recente (`~/.protonvpn-session.json` ou `~/.nordvpn-session.json`); sem nenhuma sessão, o assistente pergunta entre ProtonVPN (padrão) e NordVPN.
 - `-h`, `--help`: Exibe a especificação de sintaxe e exemplos de uso.
@@ -337,6 +349,37 @@ A NordVPN é um segundo provedor para o perfil padrão `ardc_vpn.conf`, ao lado 
    - `invalid or expired access token (HTTP 401)`: *"Token de acesso NordVPN inválido ou expirado. Gere um novo token no Nord Account."*
    - `account has no NordLynx key`: *"A conta não retornou chave NordLynx. Verifique se a assinatura NordVPN está ativa."*
    - Falha de rede: *"Falha de comunicação com a API NordVPN. Verifique sua conexão com a internet."*
+
+### 3.9 macOS — `utun`, `pf` por Grupo & Discord Web (prévia, CLI)
+
+> **Estado**: prévia para Apple Silicon. O código foi compilado para macOS e exercitado em Linux (túnel real contra o servidor, reescrita de endereços, daemon e o fluxo C++ com o desvio por grupo emulado). As partes exclusivas do macOS (sintaxe e comportamento do `pf`, `ifconfig`, `sysctl`, criação do `utun`, atribuição de permissões de privacidade) **ainda não foram validadas em um Mac**.
+
+O macOS não tem namespaces de rede nem um filtro por processo acessível sem assinatura da Apple (o caminho oficial, Network Extension, exige conta de desenvolvedor paga e notarização). O isolamento é montado com o que o sistema já traz:
+
+1. **Túnel sem rota padrão**:
+   O utilitário `ardc-tunnel` ([`tools/macos-tunnel/`](tools/macos-tunnel/)) executa o WireGuard em userspace (`wireguard-go` como biblioteca) numa interface `utunN` escolhida pelo kernel. A interface recebe o endereço do perfil e MTU 1280, e nenhuma rota é instalada: só entra no túnel o que o firewall desviar.
+2. **Desvio pelo grupo do socket**:
+   O `pf` não identifica aplicativos, mas identifica o grupo unix dono do socket. As regras ficam numa âncora própria (`com.apple/ardiscordbypass`), que o conjunto padrão do macOS já avalia, sem editar o `/etc/pf.conf`:
+   ```
+   pass out quick on ! lo0 inet proto { tcp, udp } from any to { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } group <gid> keep state
+   pass out quick on ! lo0 route-to (utunN <endereço>) inet proto { tcp, udp } from any to any group <gid> keep state
+   block return out quick on ! lo0 proto { tcp, udp } from any to any group <gid>
+   ```
+   A rede local continua direta, todo o resto do grupo vai para o túnel e o que sobrar (IPv6 incluído) é recusado na hora. O `pf` é ligado por referência (`pfctl -E`) e a referência é devolvida no encerramento (`pfctl -X`).
+3. **Reescrita do endereço de origem**:
+   Quando o `route-to` desvia o pacote, o kernel já escolheu como origem o endereço da interface da rede local, e o `pf` não traduz um pacote que desvia. O servidor VPN descarta pacotes cuja origem não é o endereço do túnel, então o `ardc-tunnel` troca a origem ao ler da interface e restaura o destino das respostas, com uma tabela por fluxo (protocolo, porta local, IP e porta remotos). Checksums de IP, TCP e UDP são atualizados de forma incremental (RFC 1624); erros ICMP (ex.: fragmentação necessária) são traduzidos para o socket original; tráfego de entrada sem fluxo conhecido é descartado. O MSS de SYN/SYN-ACK é limitado ao MTU do túnel, porque o aplicativo dimensionou os segmentos para a rede local.
+4. **TSO desligado enquanto o túnel está ativo**:
+   Com TSO o kernel entrega à placa um segmento TCP gigante para ela dividir. O `route-to` não divide: no xnu, `pf_route` descarta o segmento maior que o MTU da interface de destino e responde "fragmentação necessária". O `ardc-tunnel` grava `net.inet.tcp.tso=0` ao subir e restaura o valor anterior ao encerrar. É uma configuração global do sistema.
+5. **Lançamento sob o grupo**:
+   Trocar o grupo de um processo exige root. O executável chama a si mesmo via `sudo` com `--internal-launch <uid> <gid> <attach|detach> -- <programa>`: define os grupos (o do túnel primeiro, que é o grupo efetivo), devolve os privilégios ao usuário e executa o programa. Para o navegador, o `exec` é feito por `posix_spawn` com `POSIX_SPAWN_SETEXEC` e `responsibility_spawnattrs_setdisclaim`, para que os pedidos de microfone, câmera e gravação de tela sejam atribuídos ao navegador e não ao Terminal. O grupo não precisa existir no diretório de contas; usa-se o primeiro id livre a partir de 47823.
+6. **Navegador com perfil dedicado**:
+   O alvo é o **Discord Web** num navegador Chromium (Chrome, Brave, Edge, Chromium, Vivaldi, com `--user-data-dir` e `--app=https://discord.com/app`) ou no Firefox (`-profile ... -no-remote`). O perfil fica em `~/Library/Application Support/ARDiscordBypass/Browser-<nome>`, o que faz o navegador abrir como instância separada: a do usuário, se estiver aberta, continua fora do túnel e não é tocada. O aplicativo do Discord não é usado no macOS porque ele se atualiza e se reabre sozinho pelo sistema, e a nova instância nasceria fora do grupo.
+7. **Validação antes de abrir**:
+   Num namespace não há como vazar; aqui uma regra do `pf` que não casasse deixaria o tráfego seguir pela rede normal sem erro algum. Por isso, antes de abrir o navegador, um `curl` executado pelo mesmo lançador precisa (a) alcançar `discord.com/api/v9/gateway` e (b) sair por um IP diferente do da rede normal (`/cdn-cgi/trace`). Se os IPs forem iguais, nada é aberto e o túnel é removido.
+8. **Kill switch**:
+   Se o daemon do túnel parar com processos do grupo ainda abertos, fica carregada apenas a regra `block`, e esses processos ficam sem rede em vez de voltar para a conexão normal. `--stop` fecha os processos do grupo, encerra o daemon, esvazia a âncora, devolve a referência do `pf` e restaura o TSO.
+
+**Limites conhecidos**: Safari e navegadores WebKit não podem ser tunelados (a rede deles roda em processos do sistema que não herdam o grupo); as consultas de DNS passam pelo resolvedor do sistema, fora do túnel; não há IPv6 na janela tunelada; se o navegador se reabrir sozinho após uma atualização, a nova instância fica fora do túnel (feche e abra de novo pelo programa); os utilitários não são embutidos no executável do macOS; a Apple trata a manipulação direta de `pf`/`utun` como técnica legada.
 
 ---
 
@@ -585,6 +628,31 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o .
 CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -ldflags "-s -w" \
   -o ../../Mobile/Android/app/src/main/jniLibs/arm64-v8a/libnordconfgen.so .
 ```
+
+### 6.6 Build macOS (CLI) e Utilitários Go
+
+Requisitos no Mac: Command Line Tools do Xcode (`xcode-select --install`). O `build.sh` detecta o macOS e repassa para o `build_macos.sh`, que compila com `clang++ -std=c++20` e copia o resultado para a raiz:
+
+```bash
+cd PC
+./build.sh
+# Gera: ../ARDiscordBypass_macos
+```
+
+No macOS os utilitários não são embutidos no executável: o programa os procura em `bin/macos-arm64/` ao lado dele ou em `PC/bin/macos-arm64/`. Eles já acompanham o repositório e podem ser recompilados em qualquer sistema com Go 1.23+ (o linker do Go assina o binário arm64 de forma ad hoc, como o Apple Silicon exige):
+
+```bash
+cd tools/macos-tunnel && go test ./...
+CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o ../../PC/bin/macos-arm64/ardc-tunnel .
+
+cd ../nord-confgen
+CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o ../../PC/bin/macos-arm64/nord-confgen .
+
+cd ../proton-confgen
+CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o ../../PC/bin/macos-arm64/proton-confgen ./cmd/protonvpn-wg
+```
+
+Para Macs Intel, repita com `GOARCH=amd64` e a pasta `macos-amd64`.
 
 ---
 

@@ -1,5 +1,10 @@
 #ifdef _WIN32
 #include "os/windows/platform.h"
+#elif defined(__APPLE__) || defined(ARDCB_MACOS)
+#ifndef ARDCB_MACOS
+#define ARDCB_MACOS 1
+#endif
+#include "os/macos/platform.h"
 #else
 #include "os/linux/platform.h"
 #endif
@@ -7,6 +12,37 @@
 #include "ui.h"
 
 #include <regex>
+
+// Textos do fluxo POSIX que dependem do mecanismo de isolamento: no Linux o
+// aplicativo do Discord roda num namespace de rede; no macOS o Discord Web abre
+// num navegador cujo tráfego o firewall pf desvia para o túnel.
+#ifdef ARDCB_MACOS
+namespace Msg {
+inline const char *USAGE_TARGET = "[CAMINHO_NAVEGADOR]";
+inline const char *HELP_STOP = "Fecha o navegador aberto no túnel, destrói o túnel WireGuard e desfaz o bypass por completo.";
+inline const char *STOPPED_TUNNEL = "  - O túnel WireGuard e as regras do firewall (pf) foram removidos.";
+inline const char *STOPPED_APP = "  - O navegador aberto dentro do túnel foi fechado.";
+inline const char *LOCATING = "Localizando navegador compatível";
+inline const char *NOT_FOUND = "Nenhum navegador compatível encontrado (Chrome, Brave, Edge, Chromium, Vivaldi ou Firefox).";
+inline const char *MANUAL_EXAMPLE = " \"/Applications/Seu Navegador.app\"";
+inline const char *CLOSING_OLD = "Fechando o navegador de um túnel anterior";
+inline const char *CREATING_TUNNEL = "Criando túnel WireGuard dedicado (utun + pf)";
+inline const char *LAUNCHING = "Abrindo o Discord Web no navegador dentro do túnel";
+}
+#elif !defined(_WIN32)
+namespace Msg {
+inline const char *USAGE_TARGET = "[CAMINHO_DISCORD]";
+inline const char *HELP_STOP = "Encerra o Discord, destrói o túnel WireGuard e desfaz o bypass por completo.";
+inline const char *STOPPED_TUNNEL = "  - O túnel WireGuard e o namespace de rede foram removidos.";
+inline const char *STOPPED_APP = "  - Todas as instâncias do Discord foram finalizadas.";
+inline const char *LOCATING = "Identificando tipo de empacotamento do Discord";
+inline const char *NOT_FOUND = "Instalação do Discord não encontrada (Nativo, Flatpak, Snap ou AppImage).";
+inline const char *MANUAL_EXAMPLE = " /caminho/para/Discord";
+inline const char *CLOSING_OLD = "Encerrando instâncias abertas na rede comum";
+inline const char *CREATING_TUNNEL = "Criando túnel WireGuard dedicado (Namespace seguro)";
+inline const char *LAUNCHING = "Iniciando Discord dentro do túnel isolado";
+}
+#endif
 
 #define APP_VERSION "3.5.0"
 #define GITHUB_REPO "alrigroup/ARDiscordBypass"
@@ -260,12 +296,20 @@ static VpnProvider promptProviderChoice() {
 }
 
 inline int runCliMain(int argc, char *argv[]) {
+#ifdef ARDCB_MACOS
+  // Chamada interna (via sudo) que abre um programa sob o grupo do túnel.
+  if (argc > 1 && std::string(argv[1]) == "--internal-launch") {
+    return internalLaunchMain(argc, argv);
+  }
+#endif
+
   UI::initConsole();
 
   bool stopRequested = false;
   bool wantLogin = false;
   bool wantNordLogin = false;
   bool showHelp = false;
+  bool wantDiag = false;
   std::string customConfigFile = "";
   std::string manualDiscordArg = "";
 
@@ -294,6 +338,8 @@ inline int runCliMain(int argc, char *argv[]) {
       customConfigFile = arg.substr(9);
     } else if (arg == "--cli" || arg == "-cli") {
       continue;
+    } else if (arg == "--diag" || arg == "-diag") {
+      wantDiag = true;
     } else if (!arg.empty() && arg[0] != '-') {
       manualDiscordArg = arg;
     }
@@ -301,10 +347,17 @@ inline int runCliMain(int argc, char *argv[]) {
 
   if (showHelp) {
     printBannerAnimated();
-    std::cout << UI::CYAN << UI::BOLD << "Uso:" << UI::RESET << " " << argv[0] << " [OPÇÕES] [CAMINHO_DISCORD]\n\n"
+#ifdef _WIN32
+    const char *usageTarget = "[CAMINHO_DISCORD]";
+    const char *helpStop = "Encerra o Discord, destrói o túnel WireGuard e desfaz o bypass por completo.";
+#else
+    const char *usageTarget = Msg::USAGE_TARGET;
+    const char *helpStop = Msg::HELP_STOP;
+#endif
+    std::cout << UI::CYAN << UI::BOLD << "Uso:" << UI::RESET << " " << argv[0] << " [OPÇÕES] " << usageTarget << "\n\n"
               << UI::BOLD << "Opções disponíveis:" << UI::RESET << "\n"
               << "  " << UI::GREEN << "-stop, --stop" << UI::RESET << "\n"
-              << "      Encerra o Discord, destrói o túnel WireGuard e desfaz o bypass por completo.\n\n"
+              << "      " << helpStop << "\n\n"
               << "  " << UI::GREEN << "-cfg,  --cfg <caminho>" << UI::RESET << " (ou --config)\n"
               << "      Utiliza um arquivo de perfil WireGuard (.conf) customizado em vez do padrão.\n\n"
               << "  " << UI::GREEN << "-l,    --login" << UI::RESET << " (ou --proton)\n"
@@ -313,6 +366,10 @@ inline int runCliMain(int argc, char *argv[]) {
               << "      Gera o túnel pela NordVPN (assinatura ativa) usando um token de acesso.\n\n"
               << "  " << UI::GREEN << "--cli" << UI::RESET << "\n"
               << "      Força execução no terminal (CLI) mesmo quando compilado com GUI embutida.\n\n"
+#ifdef ARDCB_MACOS
+              << "  " << UI::GREEN << "--diag" << UI::RESET << "\n"
+              << "      Mostra o estado do túnel, do firewall (pf) e da saída para a internet, para investigar falhas.\n\n"
+#endif
               << "  " << UI::GREEN << "-h,    --help" << UI::RESET << "\n"
               << "      Exibe este menu de ajuda com todas as opções.\n\n"
               << UI::BOLD << "Exemplos de uso:" << UI::RESET << "\n"
@@ -323,6 +380,14 @@ inline int runCliMain(int argc, char *argv[]) {
               << "  " << argv[0] << " --nord                # Gera o túnel pela NordVPN (token de acesso)\n\n";
     return 0;
   }
+
+#ifdef ARDCB_MACOS
+  if (wantDiag) {
+    return runDiagnostics();
+  }
+#else
+  (void)wantDiag;
+#endif
 
   if (stopRequested) {
     printBannerAnimated();
@@ -347,8 +412,13 @@ inline int runCliMain(int argc, char *argv[]) {
     if (stopped) {
       std::cout << UI::GREEN << UI::BOLD << "=========================================================================" << UI::RESET << std::endl;
       std::cout << UI::GREEN << UI::BOLD << "  ✔ BYPASS DESATIVADO COM SUCESSO!" << UI::RESET << std::endl;
+#ifdef _WIN32
       std::cout << UI::WHITE << "  - O túnel WireGuard e o namespace de rede foram removidos." << UI::RESET << std::endl;
       std::cout << UI::WHITE << "  - Todas as instâncias do Discord foram finalizadas." << UI::RESET << std::endl;
+#else
+      std::cout << UI::WHITE << Msg::STOPPED_TUNNEL << UI::RESET << std::endl;
+      std::cout << UI::WHITE << Msg::STOPPED_APP << UI::RESET << std::endl;
+#endif
       std::cout << UI::WHITE << "  - Sua rede voltou ao estado padrão original." << UI::RESET << std::endl;
       std::cout << UI::GREEN << UI::BOLD << "=========================================================================" << UI::RESET << std::endl;
       return 0;
@@ -436,14 +506,14 @@ inline int runCliMain(int argc, char *argv[]) {
   }
 #else
   LaunchTarget launchTarget;
-  bool foundTarget = UI::spinner("Identificando tipo de empacotamento do Discord", [&]() {
+  bool foundTarget = UI::spinner(Msg::LOCATING, [&]() {
     launchTarget = locateDiscordLaunchTarget(manualDiscordArg);
     return !launchTarget.command.empty();
   });
 
   if (!foundTarget || launchTarget.command.empty()) {
-    UI::error("Instalação do Discord não encontrada (Nativo, Flatpak, Snap ou AppImage).");
-    std::cout << "  Uso manual: " << argv[0] << " /caminho/para/Discord" << std::endl;
+    UI::error(Msg::NOT_FOUND);
+    std::cout << "  Uso manual: " << argv[0] << Msg::MANUAL_EXAMPLE << std::endl;
     return 1;
   }
   UI::info("Alvo selecionado: " + launchTarget.displayName);
@@ -464,7 +534,12 @@ inline int runCliMain(int argc, char *argv[]) {
       return 0;
     }
 #endif
-    UI::spinner("Encerrando instâncias abertas na rede comum", []() {
+#ifdef _WIN32
+    const char *closingOld = "Encerrando instâncias abertas na rede comum";
+#else
+    const char *closingOld = Msg::CLOSING_OLD;
+#endif
+    UI::spinner(closingOld, []() {
       killDiscord();
     });
   }
@@ -503,7 +578,7 @@ inline int runCliMain(int argc, char *argv[]) {
 
 #ifndef _WIN32
   std::string tunnelDetail;
-  bool tunnelOk = UI::spinner("Criando túnel WireGuard dedicado (Namespace seguro)", [&]() {
+  bool tunnelOk = UI::spinner(Msg::CREATING_TUNNEL, [&]() {
     return ensureWireGuardNetns(activeConfig, &tunnelDetail);
   });
 
@@ -513,7 +588,7 @@ inline int runCliMain(int argc, char *argv[]) {
     return 1;
   }
 
-  bool launched = UI::spinner("Iniciando Discord dentro do túnel isolado", [&]() {
+  bool launched = UI::spinner(Msg::LAUNCHING, [&]() {
     return launchDiscord(launchTarget);
   });
 
@@ -548,6 +623,10 @@ inline int runCliMain(int argc, char *argv[]) {
   std::cout << UI::GREEN << UI::BOLD << "  ✔ DISCORD INICIADO COM SUCESSO! BYPASS APLICADO." << UI::RESET << std::endl;
   std::cout << UI::WHITE << "  - Sua transmissão de tela e câmera estão liberadas." << UI::RESET << std::endl;
   std::cout << UI::WHITE << "  - Todo o restante da sua máquina continua 100% na sua internet normal." << UI::RESET << std::endl;
+#ifdef ARDCB_MACOS
+  std::cout << UI::WHITE << "  - Use a janela do Discord que este programa abriu: só ela passa pelo túnel." << UI::RESET << std::endl;
+  std::cout << UI::WHITE << "  - Para fechar tudo e remover o túnel: " << argv[0] << " --stop" << UI::RESET << std::endl;
+#endif
   std::cout << UI::GREEN << UI::BOLD << "=========================================================================" << UI::RESET << std::endl;
 
 #ifdef _WIN32

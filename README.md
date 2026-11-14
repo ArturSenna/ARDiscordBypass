@@ -104,6 +104,16 @@ Para garantir **estabilidade máxima**, **zero quedas de conexão** e **privacid
   - **LOGS**: Console terminal retro-moderno com rolagem automática e botão de limpeza de logs.
   - **SOBRE**: Informações da versão, licença ARGLFU v2, créditos e atalhos para documentação técnica e repositório.
 
+#### 🍎 No macOS (Apple Silicon, somente CLI, em prévia):
+> **Prévia**: o suporte a macOS foi compilado para Apple Silicon e exercitado em Linux por emulação, mas **ainda não foi validado em um Mac**. Se algo falhar, rode `./ARDiscordBypass_macos --diag` e envie a saída.
+
+- **Como funciona**: o macOS não tem namespaces de rede. O programa sobe um túnel WireGuard numa interface `utun` que não vira rota padrão e usa o firewall `pf` para desviar para ela **apenas o navegador aberto pelo próprio programa**, direto no **Discord Web**. Seu navegador do dia a dia, o aplicativo do Discord e o resto do Mac continuam na rede normal.
+- **Compilar**: `xcode-select --install` (uma vez) e depois `cd PC && ./build.sh`. Isso gera `ARDiscordBypass_macos` na raiz do repositório. No macOS os utilitários de apoio não são embutidos: ficam em `PC/bin/macos-arm64/` e precisam acompanhar o executável.
+- **Executar**: `./ARDiscordBypass_macos` (pede a senha do `sudo`). O perfil é gerado como no Linux (ProtonVPN, `--nord` ou `-cfg seu.conf`). Em seguida abre uma janela do Chrome, Brave, Edge, Chromium, Vivaldi ou Firefox com um **perfil dedicado**; na primeira vez, entre na sua conta do Discord nessa janela.
+- **Encerrar**: `./ARDiscordBypass_macos --stop` fecha essa janela, remove o túnel e as regras do `pf`.
+- **Outro navegador**: `./ARDiscordBypass_macos "/Applications/Seu Navegador.app"`.
+- **Limitações**: o Safari não pode ser tunelado; as consultas de DNS saem pela rede normal; a janela tunelada fica sem IPv6; enquanto o túnel está ativo o TSO do TCP (`net.inet.tcp.tso`) fica desligado no sistema e volta ao valor anterior no `--stop`. Detalhes na Seção 3.9 do [**DOCS.md**](DOCS.md).
+
 #### 🧹 Como Funciona a Limpeza Total de Configurações e Sessões?
 Se você desejar apagar o perfil salvo, remover credenciais de login ou restaurar o aplicativo ao estado original de fábrica:
 - **No PC (GUI)**: Acesse a aba **CONFIGURAÇÕES** e clique no botão **"LIMPAR TODAS AS CONFIGURAÇÕES E DADOS SALVOS"**. O aplicativo encerra qualquer túnel ativo, exclui `ardc_vpn.conf` e apaga as sessões salvas: Proton em `~/.protonvpn-session.json` e NordVPN em `~/.nordvpn-session.json` (`%USERPROFILE%\...` no Windows).
@@ -121,6 +131,7 @@ A versão GUI (`ARDiscordBypass_gui_linux` e `ARDiscordBypass_gui.exe`) **conté
 | `-cfg <caminho>`, `--config` | **Configuração personalizada**: Aponta diretamente para qualquer arquivo `.conf` WireGuard no seu disco sem precisar renomear. |
 | `-l`, `--login`, `--proton` | **Renovação de credenciais**: Força um novo login na API do ProtonVPN para gerar chaves e túnel atualizados. |
 | `--nord`, `--nordvpn` | **NordVPN**: Gera o túnel pela sua assinatura NordVPN, pedindo um token de acesso do Nord Account. |
+| `--diag` | **Diagnóstico (macOS)**: mostra o estado do túnel, do firewall `pf` e por onde o tráfego sai. |
 | `-h`, `--help` | Exibe o menu de ajuda com todos os parâmetros disponíveis. |
 
 **Exemplos:**
@@ -174,12 +185,14 @@ ARDiscordBypass/
 │   ├── ui.h                  ← Engine de UI terminal, Braille dots e TrueColor
 │   ├── CMakeLists.txt        ← CMake do módulo Desktop
 │   ├── build.sh              ← Script de automação Linux (CLI + GUI)
+│   ├── build_macos.sh        ← Script de automação macOS (CLI, chamado pelo build.sh)
 │   ├── build.bat             ← Script de automação Windows (CLI + GUI)
 │   ├── core/service.h        ← Gerenciador de túnel e processos do Desktop
 │   ├── core/provider.h       ← Definições comuns dos provedores (ProtonVPN / NordVPN)
 │   ├── gui/                  ← Interface gráfica OpenGL Dear ImGui (Dark/Light)
 │   └── os/
 │       ├── linux/platform.h  ← Namespace WireGuard isolado (`ar-discord-vpn`)
+│       ├── macos/platform.h  ← utun + pf por grupo, navegador com perfil dedicado (prévia)
 │       └── windows/platform.h← WireSock WFP e controle de processos Win32
 │
 ├── tools/
@@ -187,7 +200,8 @@ ARDiscordBypass/
 │   │   ├── Makefile          ← Script de compilação multi-plataforma
 │   │   ├── cmd/protonvpn-wg/ ← Ponto de entrada CLI (main.go com DNS fallback)
 │   │   └── internal/         ← SRP auth, uTLS client, API Proton e WireGuard keygen
-│   └── nord-confgen/         ← Código-fonte aberto do gerador de perfil NordVPN (Go 1.22+)
+│   ├── nord-confgen/         ← Código-fonte aberto do gerador de perfil NordVPN (Go 1.22+)
+│   └── macos-tunnel/         ← Túnel do macOS: WireGuard userspace + regras do pf (Go 1.23+)
 │
 ├── Mobile/
 │   ├── Android/              ← App Android nativo (Kotlin, VpnService, WireGuard GoBackend)
@@ -239,6 +253,20 @@ Para informações detalhadas sobre arquitetura, protocolos e compilação manua
 cd PC
 chmod +x build.sh
 ./build.sh
+```
+
+### macOS (Apple Silicon, CLI)
+Requer as Command Line Tools do Xcode (`xcode-select --install`). O mesmo `build.sh` detecta o macOS e compila com `clang++`:
+```bash
+cd PC
+./build.sh
+# Gera: ../ARDiscordBypass_macos (usa os utilitários de PC/bin/macos-arm64/)
+```
+Os utilitários Go do macOS já acompanham o repositório. Para recompilá-los:
+```bash
+cd tools/macos-tunnel   && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o ../../PC/bin/macos-arm64/ardc-tunnel .
+cd ../nord-confgen      && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o ../../PC/bin/macos-arm64/nord-confgen .
+cd ../proton-confgen    && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o ../../PC/bin/macos-arm64/proton-confgen ./cmd/protonvpn-wg
 ```
 
 ### Windows (MinGW / CMD)
